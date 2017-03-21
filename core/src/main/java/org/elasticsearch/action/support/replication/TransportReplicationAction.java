@@ -99,15 +99,15 @@ public abstract class TransportReplicationAction<
 
     private final TransportService transportService;
     protected final ClusterService clusterService;
+    protected final ShardStateAction shardStateAction;
     private final IndicesService indicesService;
-    private final ShardStateAction shardStateAction;
     private final TransportRequestOptions transportOptions;
     private final String executor;
 
     // package private for testing
     private final String transportReplicaAction;
     private final String transportPrimaryAction;
-    private final ReplicasProxy replicasProxy;
+    private final ReplicationOperation.Replicas replicasProxy;
 
     protected TransportReplicationAction(Settings settings, String actionName, TransportService transportService,
                                          ClusterService clusterService, IndicesService indicesService,
@@ -135,7 +135,7 @@ public abstract class TransportReplicationAction<
 
         this.transportOptions = transportOptions();
 
-        this.replicasProxy = new ReplicasProxy();
+        this.replicasProxy = newReplicasProxy();
     }
 
     @Override
@@ -146,6 +146,10 @@ public abstract class TransportReplicationAction<
     @Override
     protected void doExecute(Task task, Request request, ActionListener<Response> listener) {
         new ReroutePhase((ReplicationTask) task, request, listener).run();
+    }
+
+    protected ReplicationOperation.Replicas newReplicasProxy() {
+        return new ReplicasProxy();
     }
 
     protected abstract Response newResponseInstance();
@@ -173,7 +177,8 @@ public abstract class TransportReplicationAction<
      * @param shardRequest the request to the primary shard
      * @param primary      the primary shard to perform the operation on
      */
-    protected abstract PrimaryResult shardOperationOnPrimary(Request shardRequest, IndexShard primary) throws Exception;
+    protected abstract PrimaryResult<ReplicaRequest, Response> shardOperationOnPrimary(
+            Request shardRequest, IndexShard primary) throws Exception;
 
     /**
      * Synchronous replica operation on nodes with replica copies. This is done under the lock form
@@ -314,7 +319,7 @@ public abstract class TransportReplicationAction<
                 } else {
                     setPhase(replicationTask, "primary");
                     final IndexMetaData indexMetaData = clusterService.state().getMetaData().index(request.shardId().getIndex());
-                    final boolean executeOnReplicas = (indexMetaData == null) || shouldExecuteReplication(indexMetaData.getSettings());
+                    final boolean executeOnReplicas = (indexMetaData == null) || shouldExecuteReplication(indexMetaData);
                     final ActionListener<Response> listener = createResponseListener(primaryShardReference);
                     createReplicatedOperation(request,
                             ActionListener.wrap(result -> result.respond(listener), listener::onFailure),
@@ -364,19 +369,20 @@ public abstract class TransportReplicationAction<
             };
         }
 
-        protected ReplicationOperation<Request, ReplicaRequest, PrimaryResult> createReplicatedOperation(
-            Request request, ActionListener<PrimaryResult> listener,
+        protected ReplicationOperation<Request, ReplicaRequest, PrimaryResult<ReplicaRequest, Response>> createReplicatedOperation(
+            Request request, ActionListener<PrimaryResult<ReplicaRequest, Response>> listener,
             PrimaryShardReference primaryShardReference, boolean executeOnReplicas) {
             return new ReplicationOperation<>(request, primaryShardReference, listener,
-                executeOnReplicas, replicasProxy, clusterService::state, logger, actionName
-            );
+                    executeOnReplicas, replicasProxy, clusterService::state, logger, actionName);
         }
     }
 
-    protected class PrimaryResult implements ReplicationOperation.PrimaryResult<ReplicaRequest> {
+    protected static class PrimaryResult<ReplicaRequest extends ReplicationRequest<ReplicaRequest>,
+            Response extends ReplicationResponse>
+            implements ReplicationOperation.PrimaryResult<ReplicaRequest> {
         final ReplicaRequest replicaRequest;
-        final Response finalResponseIfSuccessful;
-        final Exception finalFailure;
+        public final Response finalResponseIfSuccessful;
+        public final Exception finalFailure;
 
         /**
          * Result of executing a primary operation
@@ -416,7 +422,7 @@ public abstract class TransportReplicationAction<
         }
     }
 
-    protected class ReplicaResult {
+    protected static class ReplicaResult {
         final Exception finalFailure;
 
         public ReplicaResult(Exception finalFailure) {
@@ -511,16 +517,15 @@ public abstract class TransportReplicationAction<
                             request),
                     e);
                 request.onRetry();
-                final ThreadContext.StoredContext context = threadPool.getThreadContext().newStoredContext();
                 observer.waitForNextChange(new ClusterStateObserver.Listener() {
                     @Override
                     public void onNewClusterState(ClusterState state) {
-                        context.close();
                         // Forking a thread on local node via transport service so that custom transport service have an
                         // opportunity to execute custom logic before the replica operation begins
                         String extraMessage = "action [" + transportReplicaAction + "], request[" + request + "]";
                         TransportChannelResponseHandler<TransportResponse.Empty> handler =
-                            new TransportChannelResponseHandler<>(logger, channel, extraMessage, () -> TransportResponse.Empty.INSTANCE);
+                            new TransportChannelResponseHandler<>(logger, channel, extraMessage,
+                                () -> TransportResponse.Empty.INSTANCE);
                         transportService.sendRequest(clusterService.localNode(), transportReplicaAction,
                             new ConcreteShardRequest<>(request, targetAllocationID),
                             handler);
@@ -573,7 +578,7 @@ public abstract class TransportReplicationAction<
         private class ResponseListener implements ActionListener<TransportResponse.Empty> {
             private final ReplicaResponse replicaResponse;
 
-            public ResponseListener(ReplicaResponse replicaResponse) {
+            ResponseListener(ReplicaResponse replicaResponse) {
                 this.replicaResponse = replicaResponse;
             }
 
@@ -661,7 +666,6 @@ public abstract class TransportReplicationAction<
                 return;
             }
             final DiscoveryNode node = state.nodes().get(primary.currentNodeId());
-            taskManager.registerChildTask(task, node.getId());
             if (primary.currentNodeId().equals(state.nodes().getLocalNodeId())) {
                 performLocalAction(state, primary, node);
             } else {
@@ -807,11 +811,9 @@ public abstract class TransportReplicationAction<
             }
             setPhase(task, "waiting_for_retry");
             request.onRetry();
-            final ThreadContext.StoredContext context = threadPool.getThreadContext().newStoredContext();
             observer.waitForNextChange(new ClusterStateObserver.Listener() {
                 @Override
                 public void onNewClusterState(ClusterState state) {
-                    context.close();
                     run();
                 }
 
@@ -822,7 +824,6 @@ public abstract class TransportReplicationAction<
 
                 @Override
                 public void onTimeout(TimeValue timeout) {
-                    context.close();
                     // Try one more time...
                     run();
                 }
@@ -912,8 +913,8 @@ public abstract class TransportReplicationAction<
      * Indicated whether this operation should be replicated to shadow replicas or not. If this method returns true the replication phase
      * will be skipped. For example writes such as index and delete don't need to be replicated on shadow replicas but refresh and flush do.
      */
-    protected boolean shouldExecuteReplication(Settings settings) {
-        return IndexMetaData.isIndexUsingShadowReplicas(settings) == false;
+    protected boolean shouldExecuteReplication(IndexMetaData indexMetaData) {
+        return indexMetaData.isIndexUsingShadowReplicas() == false;
     }
 
     class ShardReference implements Releasable {
@@ -941,7 +942,8 @@ public abstract class TransportReplicationAction<
 
     }
 
-    class PrimaryShardReference extends ShardReference implements ReplicationOperation.Primary<Request, ReplicaRequest, PrimaryResult> {
+    class PrimaryShardReference extends ShardReference
+            implements ReplicationOperation.Primary<Request, ReplicaRequest, PrimaryResult<ReplicaRequest, Response>> {
 
         PrimaryShardReference(IndexShard indexShard, Releasable operationLock) {
             super(indexShard, operationLock);
@@ -1031,7 +1033,13 @@ public abstract class TransportReplicationAction<
         }
     }
 
-    final class ReplicasProxy implements ReplicationOperation.Replicas<ReplicaRequest> {
+    /**
+     * The {@code ReplicasProxy} is an implementation of the {@code Replicas}
+     * interface that performs the actual {@code ReplicaRequest} on the replica
+     * shards. It also encapsulates the logic required for failing the replica
+     * if deemed necessary as well as marking it as stale when needed.
+     */
+    class ReplicasProxy implements ReplicationOperation.Replicas<ReplicaRequest> {
 
         @Override
         public void performOn(ShardRouting replica, ReplicaRequest request, ActionListener<ReplicationOperation.ReplicaResponse> listener) {
@@ -1042,45 +1050,28 @@ public abstract class TransportReplicationAction<
                 return;
             }
             final ConcreteShardRequest<ReplicaRequest> concreteShardRequest =
-                new ConcreteShardRequest<>(request, replica.allocationId().getId());
+                    new ConcreteShardRequest<>(request, replica.allocationId().getId());
             sendReplicaRequest(concreteShardRequest, node, listener);
         }
 
         @Override
-        public void failShard(ShardRouting replica, long primaryTerm, String message, Exception exception,
-                              Runnable onSuccess, Consumer<Exception> onPrimaryDemoted, Consumer<Exception> onIgnoredFailure) {
-            shardStateAction.remoteShardFailed(replica.shardId(), replica.allocationId().getId(), primaryTerm, message, exception,
-                createListener(onSuccess, onPrimaryDemoted, onIgnoredFailure));
+        public void failShardIfNeeded(ShardRouting replica, long primaryTerm, String message, Exception exception,
+                                      Runnable onSuccess, Consumer<Exception> onPrimaryDemoted, Consumer<Exception> onIgnoredFailure) {
+            // This does not need to fail the shard. The idea is that this
+            // is a non-write operation (something like a refresh or a global
+            // checkpoint sync) and therefore the replica should still be
+            // "alive" if it were to fail.
+            onSuccess.run();
         }
 
         @Override
-        public void markShardCopyAsStale(ShardId shardId, String allocationId, long primaryTerm, Runnable onSuccess,
-                                         Consumer<Exception> onPrimaryDemoted, Consumer<Exception> onIgnoredFailure) {
-            shardStateAction.remoteShardFailed(shardId, allocationId, primaryTerm, "mark copy as stale", null,
-                createListener(onSuccess, onPrimaryDemoted, onIgnoredFailure));
-        }
-
-        private ShardStateAction.Listener createListener(final Runnable onSuccess, final Consumer<Exception> onPrimaryDemoted,
-                                                         final Consumer<Exception> onIgnoredFailure) {
-            return new ShardStateAction.Listener() {
-                @Override
-                public void onSuccess() {
-                    onSuccess.run();
-                }
-
-                @Override
-                public void onFailure(Exception shardFailedError) {
-                    if (shardFailedError instanceof ShardStateAction.NoLongerPrimaryShardException) {
-                        onPrimaryDemoted.accept(shardFailedError);
-                    } else {
-                        // these can occur if the node is shutting down and are okay
-                        // any other exception here is not expected and merits investigation
-                        assert shardFailedError instanceof TransportException ||
-                            shardFailedError instanceof NodeClosedException : shardFailedError;
-                        onIgnoredFailure.accept(shardFailedError);
-                    }
-                }
-            };
+        public void markShardCopyAsStaleIfNeeded(ShardId shardId, String allocationId, long primaryTerm, Runnable onSuccess,
+                                                 Consumer<Exception> onPrimaryDemoted, Consumer<Exception> onIgnoredFailure) {
+            // This does not need to make the shard stale. The idea is that this
+            // is a non-write operation (something like a refresh or a global
+            // checkpoint sync) and therefore the replica should still be
+            // "alive" if it were to be marked as stale.
+            onSuccess.run();
         }
     }
 

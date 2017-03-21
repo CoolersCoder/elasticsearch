@@ -38,6 +38,7 @@ import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.xcontent.XContentFactory;
+import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.discovery.zen.ElectMasterService;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.env.NodeEnvironment;
@@ -435,7 +436,7 @@ public class GatewayIndexStateIT extends ESIntegTestCase {
         assertEquals(ex.getMessage(), "Failed to verify index " + metaData.getIndex());
         assertNotNull(ex.getCause());
         assertEquals(IllegalArgumentException.class, ex.getCause().getClass());
-        assertEquals(ex.getCause().getMessage(), "Unknown tokenfilter type [icu_collation] for [myCollator]");
+        assertEquals(ex.getCause().getMessage(), "Unknown filter type [icu_collation] for [myCollator]");
     }
 
     /**
@@ -459,7 +460,7 @@ public class GatewayIndexStateIT extends ESIntegTestCase {
                 "        }\n" +
                 "      }\n" +
                 "    }\n" +
-                "  }}").get();
+                "  }}", XContentType.JSON).get();
         logger.info("--> indexing a simple document");
         client().prepareIndex("test", "type1", "1").setSource("field1", "value one").setRefreshPolicy(IMMEDIATE).get();
         logger.info("--> waiting for green status");

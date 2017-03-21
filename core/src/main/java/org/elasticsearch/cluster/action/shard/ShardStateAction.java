@@ -25,10 +25,10 @@ import org.apache.logging.log4j.util.Supplier;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.cluster.ClusterChangedEvent;
+import org.elasticsearch.cluster.ClusterStateTaskExecutor;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.ClusterStateObserver;
 import org.elasticsearch.cluster.ClusterStateTaskConfig;
-import org.elasticsearch.cluster.ClusterStateTaskExecutor;
 import org.elasticsearch.cluster.ClusterStateTaskListener;
 import org.elasticsearch.cluster.MasterNodeChangePredicate;
 import org.elasticsearch.cluster.NotMasterException;
@@ -199,7 +199,7 @@ public class ShardStateAction extends AbstractComponent {
         private final ShardFailedClusterStateTaskExecutor shardFailedClusterStateTaskExecutor;
         private final Logger logger;
 
-        public ShardFailedTransportHandler(ClusterService clusterService, ShardFailedClusterStateTaskExecutor shardFailedClusterStateTaskExecutor, Logger logger) {
+        ShardFailedTransportHandler(ClusterService clusterService, ShardFailedClusterStateTaskExecutor shardFailedClusterStateTaskExecutor, Logger logger) {
             this.clusterService = clusterService;
             this.shardFailedClusterStateTaskExecutor = shardFailedClusterStateTaskExecutor;
             this.logger = logger;
@@ -260,8 +260,8 @@ public class ShardStateAction extends AbstractComponent {
         }
 
         @Override
-        public BatchResult<ShardEntry> execute(ClusterState currentState, List<ShardEntry> tasks) throws Exception {
-            BatchResult.Builder<ShardEntry> batchResultBuilder = BatchResult.builder();
+        public ClusterTasksResult<ShardEntry> execute(ClusterState currentState, List<ShardEntry> tasks) throws Exception {
+            ClusterTasksResult.Builder<ShardEntry> batchResultBuilder = ClusterTasksResult.builder();
             List<ShardEntry> tasksToBeApplied = new ArrayList<>();
             List<FailedShard> failedShardsToBeApplied = new ArrayList<>();
             List<StaleShard> staleShardsToBeApplied = new ArrayList<>();
@@ -365,7 +365,7 @@ public class ShardStateAction extends AbstractComponent {
         private final ShardStartedClusterStateTaskExecutor shardStartedClusterStateTaskExecutor;
         private final Logger logger;
 
-        public ShardStartedTransportHandler(ClusterService clusterService, ShardStartedClusterStateTaskExecutor shardStartedClusterStateTaskExecutor, Logger logger) {
+        ShardStartedTransportHandler(ClusterService clusterService, ShardStartedClusterStateTaskExecutor shardStartedClusterStateTaskExecutor, Logger logger) {
             this.clusterService = clusterService;
             this.shardStartedClusterStateTaskExecutor = shardStartedClusterStateTaskExecutor;
             this.logger = logger;
@@ -394,8 +394,8 @@ public class ShardStateAction extends AbstractComponent {
         }
 
         @Override
-        public BatchResult<ShardEntry> execute(ClusterState currentState, List<ShardEntry> tasks) throws Exception {
-            BatchResult.Builder<ShardEntry> builder = BatchResult.builder();
+        public ClusterTasksResult<ShardEntry> execute(ClusterState currentState, List<ShardEntry> tasks) throws Exception {
+            ClusterTasksResult.Builder<ShardEntry> builder = ClusterTasksResult.builder();
             List<ShardEntry> tasksToBeApplied = new ArrayList<>();
             List<ShardRouting> shardRoutingsToBeApplied = new ArrayList<>(tasks.size());
             Set<ShardRouting> seenShardRoutings = new HashSet<>(); // to prevent duplicates

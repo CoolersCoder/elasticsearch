@@ -18,25 +18,21 @@
  */
 package org.elasticsearch.search;
 
-import org.elasticsearch.common.ParseFieldMatcher;
-import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.inject.ModuleTestCase;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.XContentParser;
-import org.elasticsearch.common.xcontent.json.JsonXContent;
+import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryParseContext;
-import org.elasticsearch.index.query.QueryParser;
 import org.elasticsearch.index.query.TermQueryBuilder;
 import org.elasticsearch.index.query.functionscore.GaussDecayFunctionBuilder;
-import org.elasticsearch.indices.query.IndicesQueriesRegistry;
 import org.elasticsearch.plugins.SearchPlugin;
 import org.elasticsearch.search.aggregations.AggregationBuilder;
 import org.elasticsearch.search.aggregations.AggregatorFactories.Builder;
 import org.elasticsearch.search.aggregations.AggregatorFactory;
+import org.elasticsearch.search.aggregations.BaseAggregationBuilder;
 import org.elasticsearch.search.aggregations.InternalAggregation;
 import org.elasticsearch.search.aggregations.InternalAggregation.ReduceContext;
 import org.elasticsearch.search.aggregations.bucket.significant.heuristics.ChiSquare;
@@ -62,24 +58,25 @@ import org.elasticsearch.search.fetch.subphase.highlight.Highlighter;
 import org.elasticsearch.search.fetch.subphase.highlight.PlainHighlighter;
 import org.elasticsearch.search.fetch.subphase.highlight.PostingsHighlighter;
 import org.elasticsearch.search.internal.SearchContext;
-import org.elasticsearch.search.suggest.CustomSuggester;
-import org.elasticsearch.search.suggest.Suggester;
-import org.elasticsearch.search.suggest.completion.CompletionSuggester;
-import org.elasticsearch.search.suggest.phrase.PhraseSuggester;
-import org.elasticsearch.search.suggest.term.TermSuggester;
+import org.elasticsearch.search.suggest.CustomSuggesterSearchIT.CustomSuggestionBuilder;
+import org.elasticsearch.search.suggest.SuggestionBuilder;
+import org.elasticsearch.search.suggest.term.TermSuggestionBuilder;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static java.util.Collections.emptyList;
 import static java.util.Collections.singletonList;
 import static java.util.Collections.singletonMap;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toSet;
 import static org.hamcrest.Matchers.containsInAnyOrder;
-import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.hasSize;
 
 public class SearchModuleTests extends ModuleTestCase {
 
@@ -94,13 +91,12 @@ public class SearchModuleTests extends ModuleTestCase {
                 () -> new SearchModule(Settings.EMPTY, false, singletonList(registersDupeHighlighter)));
 
         SearchPlugin registersDupeSuggester = new SearchPlugin() {
-            @Override
-            public Map<String,org.elasticsearch.search.suggest.Suggester<?>> getSuggesters() {
-                return singletonMap("term", TermSuggester.INSTANCE);
+            public List<SearchPlugin.SuggesterSpec<?>> getSuggesters() {
+                return singletonList(new SuggesterSpec<>("term", TermSuggestionBuilder::new, TermSuggestionBuilder::fromXContent));
             }
         };
-        expectThrows(IllegalArgumentException.class,
-                () -> new SearchModule(Settings.EMPTY, false, singletonList(registersDupeSuggester)));
+        expectThrows(IllegalArgumentException.class, () -> new NamedXContentRegistry(
+                new SearchModule(Settings.EMPTY, false, singletonList(registersDupeSuggester)).getNamedXContents()));
 
         SearchPlugin registersDupeScoreFunction = new SearchPlugin() {
             @Override
@@ -109,8 +105,8 @@ public class SearchModuleTests extends ModuleTestCase {
                         GaussDecayFunctionBuilder.PARSER));
             }
         };
-        SearchModule searchModule = new SearchModule(Settings.EMPTY, false, singletonList(registersDupeScoreFunction));
-        expectThrows(IllegalArgumentException.class, () -> new NamedXContentRegistry(searchModule.getNamedXContents()));
+        expectThrows(IllegalArgumentException.class, () -> new NamedXContentRegistry(
+                new SearchModule(Settings.EMPTY, false, singletonList(registersDupeScoreFunction)).getNamedXContents()));
 
         SearchPlugin registersDupeSignificanceHeuristic = new SearchPlugin() {
             @Override
@@ -144,8 +140,8 @@ public class SearchModuleTests extends ModuleTestCase {
                 return singletonList(new QuerySpec<>(TermQueryBuilder.NAME, TermQueryBuilder::new, TermQueryBuilder::fromXContent));
             }
         };
-        expectThrows(IllegalArgumentException.class, () -> new SearchModule(Settings.EMPTY, false,
-                singletonList(registersDupeQuery)));
+        expectThrows(IllegalArgumentException.class, () -> new NamedXContentRegistry(
+                new SearchModule(Settings.EMPTY, false, singletonList(registersDupeQuery)).getNamedXContents()));
 
         SearchPlugin registersDupeAggregation = new SearchPlugin() {
             public List<AggregationSpec> getAggregations() {
@@ -153,8 +149,8 @@ public class SearchModuleTests extends ModuleTestCase {
                         TermsAggregationBuilder::parse));
             }
         };
-        expectThrows(IllegalArgumentException.class, () -> new SearchModule(Settings.EMPTY, false,
-                singletonList(registersDupeAggregation)));
+        expectThrows(IllegalArgumentException.class, () -> new NamedXContentRegistry(new SearchModule(Settings.EMPTY, false,
+                singletonList(registersDupeAggregation)).getNamedXContents()));
 
         SearchPlugin registersDupePipelineAggregation = new SearchPlugin() {
             public List<PipelineAggregationSpec> getPipelineAggregations() {
@@ -166,21 +162,34 @@ public class SearchModuleTests extends ModuleTestCase {
                             .addResultReader(InternalDerivative::new));
             }
         };
-        expectThrows(IllegalArgumentException.class, () -> new SearchModule(Settings.EMPTY, false,
-                singletonList(registersDupePipelineAggregation)));
+        expectThrows(IllegalArgumentException.class, () -> new NamedXContentRegistry(new SearchModule(Settings.EMPTY, false,
+                singletonList(registersDupePipelineAggregation)).getNamedXContents()));
     }
 
     public void testRegisterSuggester() {
         SearchModule module = new SearchModule(Settings.EMPTY, false, singletonList(new SearchPlugin() {
             @Override
-            public Map<String, Suggester<?>> getSuggesters() {
-                return singletonMap("custom", CustomSuggester.INSTANCE);
+            public List<SuggesterSpec<?>> getSuggesters() {
+                return singletonList(new SuggesterSpec<>("custom", CustomSuggestionBuilder::new, CustomSuggestionBuilder::fromXContent));
             }
         }));
-        assertSame(TermSuggester.INSTANCE, module.getSuggesters().getSuggester("term"));
-        assertSame(PhraseSuggester.INSTANCE, module.getSuggesters().getSuggester("phrase"));
-        assertSame(CompletionSuggester.INSTANCE, module.getSuggesters().getSuggester("completion"));
-        assertSame(CustomSuggester.INSTANCE, module.getSuggesters().getSuggester("custom"));
+        assertEquals(1, module.getNamedXContents().stream()
+                .filter(e -> e.categoryClass.equals(SuggestionBuilder.class) && e.name.match("term")).count());
+        assertEquals(1, module.getNamedXContents().stream()
+                .filter(e -> e.categoryClass.equals(SuggestionBuilder.class) && e.name.match("phrase")).count());
+        assertEquals(1, module.getNamedXContents().stream()
+                .filter(e -> e.categoryClass.equals(SuggestionBuilder.class) && e.name.match("completion")).count());
+        assertEquals(1, module.getNamedXContents().stream()
+                .filter(e -> e.categoryClass.equals(SuggestionBuilder.class) && e.name.match("custom")).count());
+
+        assertEquals(1, module.getNamedWriteables().stream()
+                .filter(e -> e.categoryClass.equals(SuggestionBuilder.class) && e.name.equals("term")).count());
+        assertEquals(1, module.getNamedWriteables().stream()
+                .filter(e -> e.categoryClass.equals(SuggestionBuilder.class) && e.name.equals("phrase")).count());
+        assertEquals(1, module.getNamedWriteables().stream()
+                .filter(e -> e.categoryClass.equals(SuggestionBuilder.class) && e.name.equals("completion")).count());
+        assertEquals(1, module.getNamedWriteables().stream()
+                .filter(e -> e.categoryClass.equals(SuggestionBuilder.class) && e.name.equals("custom")).count());
     }
 
     public void testRegisterHighlighter() {
@@ -200,31 +209,22 @@ public class SearchModuleTests extends ModuleTestCase {
     }
 
     public void testRegisteredQueries() throws IOException {
-        SearchModule module = new SearchModule(Settings.EMPTY, false, emptyList());
         List<String> allSupportedQueries = new ArrayList<>();
         Collections.addAll(allSupportedQueries, NON_DEPRECATED_QUERIES);
         Collections.addAll(allSupportedQueries, DEPRECATED_QUERIES);
-        String[] supportedQueries = allSupportedQueries.toArray(new String[allSupportedQueries.size()]);
-        assertThat(module.getQueryParserRegistry().getNames(), containsInAnyOrder(supportedQueries));
+        SearchModule module = new SearchModule(Settings.EMPTY, false, emptyList());
 
-        IndicesQueriesRegistry indicesQueriesRegistry = module.getQueryParserRegistry();
-        XContentParser dummyParser = createParser(JsonXContent.jsonXContent, new BytesArray("{}"));
-        for (String queryName : supportedQueries) {
-            indicesQueriesRegistry.lookup(queryName, ParseFieldMatcher.EMPTY, dummyParser.getTokenLocation());
-        }
+        Set<String> registeredNonDeprecated = module.getNamedXContents().stream()
+                .filter(e -> e.categoryClass.equals(QueryBuilder.class))
+                .map(e -> e.name.getPreferredName())
+                .collect(toSet());
+        Set<String> registeredAll = module.getNamedXContents().stream()
+                .filter(e -> e.categoryClass.equals(QueryBuilder.class))
+                .flatMap(e -> Arrays.stream(e.name.getAllNamesIncludedDeprecated()))
+                .collect(toSet());
 
-        for (String queryName : NON_DEPRECATED_QUERIES) {
-            QueryParser<?> queryParser = indicesQueriesRegistry.lookup(queryName, ParseFieldMatcher.STRICT, dummyParser.getTokenLocation());
-            assertThat(queryParser, notNullValue());
-        }
-        for (String queryName : DEPRECATED_QUERIES) {
-            try {
-                indicesQueriesRegistry.lookup(queryName, ParseFieldMatcher.STRICT, dummyParser.getTokenLocation());
-                fail("query is deprecated, getQueryParser should have failed in strict mode");
-            } catch(IllegalArgumentException e) {
-                assertThat(e.getMessage(), containsString("Deprecated field [" + queryName + "] used"));
-            }
-        }
+        assertThat(registeredNonDeprecated, containsInAnyOrder(NON_DEPRECATED_QUERIES));
+        assertThat(registeredAll, containsInAnyOrder(allSupportedQueries.toArray(new String[0])));
     }
 
     public void testRegisterAggregation() {
@@ -234,7 +234,11 @@ public class SearchModuleTests extends ModuleTestCase {
             }
         }));
 
-        assertNotNull(module.getAggregatorParsers().parser("test", ParseFieldMatcher.STRICT));
+        assertThat(
+                module.getNamedXContents().stream()
+                    .filter(entry -> entry.categoryClass.equals(BaseAggregationBuilder.class) && entry.name.match("test"))
+                    .collect(toList()),
+                hasSize(1));
     }
 
     public void testRegisterPipelineAggregation() {
@@ -245,7 +249,11 @@ public class SearchModuleTests extends ModuleTestCase {
             }
         }));
 
-        assertNotNull(module.getAggregatorParsers().pipelineParser("test", ParseFieldMatcher.STRICT));
+        assertThat(
+                module.getNamedXContents().stream()
+                    .filter(entry -> entry.categoryClass.equals(BaseAggregationBuilder.class) && entry.name.match("test"))
+                    .collect(toList()),
+                hasSize(1));
     }
 
     private static final String[] NON_DEPRECATED_QUERIES = new String[] {
@@ -310,7 +318,7 @@ public class SearchModuleTests extends ModuleTestCase {
         }
 
         @Override
-        public String getWriteableName() {
+        public String getType() {
             return "test";
         }
 
@@ -351,7 +359,7 @@ public class SearchModuleTests extends ModuleTestCase {
         /**
          * Read from a stream.
          */
-        public TestPipelineAggregationBuilder(StreamInput in) throws IOException {
+        TestPipelineAggregationBuilder(StreamInput in) throws IOException {
             super(in, "test");
         }
 
@@ -396,7 +404,7 @@ public class SearchModuleTests extends ModuleTestCase {
         /**
          * Read from a stream.
          */
-        public TestPipelineAggregator(StreamInput in) throws IOException {
+        TestPipelineAggregator(StreamInput in) throws IOException {
             super(in);
         }
         @Override

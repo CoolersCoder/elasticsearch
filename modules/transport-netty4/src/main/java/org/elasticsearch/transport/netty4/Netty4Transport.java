@@ -32,11 +32,8 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.FixedRecvByteBufAllocator;
 import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.channel.oio.OioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
-import io.netty.channel.socket.oio.OioServerSocketChannel;
-import io.netty.channel.socket.oio.OioSocketChannel;
 import io.netty.util.concurrent.Future;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.apache.logging.log4j.util.Supplier;
@@ -53,6 +50,7 @@ import org.elasticsearch.common.network.NetworkService.TcpSettings;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.unit.ByteSizeUnit;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.util.BigArrays;
@@ -109,24 +107,12 @@ public class Netty4Transport extends TcpTransport<Channel> {
     public static final Setting<Integer> NETTY_MAX_COMPOSITE_BUFFER_COMPONENTS =
         Setting.intSetting("transport.netty.max_composite_buffer_components", -1, -1, Property.NodeScope, Property.Shared);
 
-    // See AdaptiveReceiveBufferSizePredictor#DEFAULT_XXX for default values in netty..., we can use higher ones for us, even fixed one
     public static final Setting<ByteSizeValue> NETTY_RECEIVE_PREDICTOR_SIZE = Setting.byteSizeSetting(
-            "transport.netty.receive_predictor_size",
-            settings -> {
-                long defaultReceiverPredictor = 512 * 1024;
-                if (JvmInfo.jvmInfo().getMem().getDirectMemoryMax().getBytes() > 0) {
-                    // we can guess a better default...
-                    long l = (long) ((0.3 * JvmInfo.jvmInfo().getMem().getDirectMemoryMax().getBytes()) / WORKER_COUNT.get(settings));
-                    defaultReceiverPredictor = Math.min(defaultReceiverPredictor, Math.max(l, 64 * 1024));
-                }
-                return new ByteSizeValue(defaultReceiverPredictor).toString();
-            },
-            Property.NodeScope,
-            Property.Shared);
+            "transport.netty.receive_predictor_size", new ByteSizeValue(64, ByteSizeUnit.KB), Property.NodeScope);
     public static final Setting<ByteSizeValue> NETTY_RECEIVE_PREDICTOR_MIN =
-        byteSizeSetting("transport.netty.receive_predictor_min", NETTY_RECEIVE_PREDICTOR_SIZE, Property.NodeScope, Property.Shared);
+        byteSizeSetting("transport.netty.receive_predictor_min", NETTY_RECEIVE_PREDICTOR_SIZE, Property.NodeScope);
     public static final Setting<ByteSizeValue> NETTY_RECEIVE_PREDICTOR_MAX =
-        byteSizeSetting("transport.netty.receive_predictor_max", NETTY_RECEIVE_PREDICTOR_SIZE, Property.NodeScope, Property.Shared);
+        byteSizeSetting("transport.netty.receive_predictor_max", NETTY_RECEIVE_PREDICTOR_SIZE, Property.NodeScope);
     public static final Setting<Integer> NETTY_BOSS_COUNT =
         intSetting("transport.netty.boss_count", 1, 1, Property.NodeScope, Property.Shared);
 
@@ -193,13 +179,8 @@ public class Netty4Transport extends TcpTransport<Channel> {
 
     private Bootstrap createBootstrap() {
         final Bootstrap bootstrap = new Bootstrap();
-        if (TCP_BLOCKING_CLIENT.get(settings)) {
-            bootstrap.group(new OioEventLoopGroup(1, daemonThreadFactory(settings, TRANSPORT_CLIENT_WORKER_THREAD_NAME_PREFIX)));
-            bootstrap.channel(OioSocketChannel.class);
-        } else {
-            bootstrap.group(new NioEventLoopGroup(workerCount, daemonThreadFactory(settings, TRANSPORT_CLIENT_BOSS_THREAD_NAME_PREFIX)));
-            bootstrap.channel(NioSocketChannel.class);
-        }
+        bootstrap.group(new NioEventLoopGroup(workerCount, daemonThreadFactory(settings, TRANSPORT_CLIENT_BOSS_THREAD_NAME_PREFIX)));
+        bootstrap.channel(NioSocketChannel.class);
 
         bootstrap.handler(getClientChannelInitializer());
 
@@ -282,13 +263,8 @@ public class Netty4Transport extends TcpTransport<Channel> {
 
         final ServerBootstrap serverBootstrap = new ServerBootstrap();
 
-        if (TCP_BLOCKING_SERVER.get(settings)) {
-            serverBootstrap.group(new OioEventLoopGroup(workerCount, workerFactory));
-            serverBootstrap.channel(OioServerSocketChannel.class);
-        } else {
-            serverBootstrap.group(new NioEventLoopGroup(workerCount, workerFactory));
-            serverBootstrap.channel(NioServerSocketChannel.class);
-        }
+        serverBootstrap.group(new NioEventLoopGroup(workerCount, workerFactory));
+        serverBootstrap.channel(NioServerSocketChannel.class);
 
         serverBootstrap.childHandler(getServerChannelInitializer(name, settings));
 

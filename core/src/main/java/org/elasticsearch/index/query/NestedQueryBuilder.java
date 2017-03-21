@@ -32,6 +32,8 @@ import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.index.mapper.ObjectMapper;
+import org.elasticsearch.index.search.ESToParentBlockJoinQuery;
+import org.elasticsearch.index.search.NestedHelper;
 
 import java.io.IOException;
 import java.util.Map;
@@ -103,8 +105,8 @@ public class NestedQueryBuilder extends AbstractQueryBuilder<NestedQueryBuilder>
         return innerHitBuilder;
     }
 
-    public NestedQueryBuilder innerHit(InnerHitBuilder innerHit) {
-        this.innerHitBuilder = new InnerHitBuilder(innerHit, path, query);
+    public NestedQueryBuilder innerHit(InnerHitBuilder innerHit, boolean ignoreUnmapped) {
+        this.innerHitBuilder = new InnerHitBuilder(innerHit, path, query, ignoreUnmapped);
         return this;
     }
 
@@ -166,23 +168,23 @@ public class NestedQueryBuilder extends AbstractQueryBuilder<NestedQueryBuilder>
             if (token == XContentParser.Token.FIELD_NAME) {
                 currentFieldName = parser.currentName();
             } else if (token == XContentParser.Token.START_OBJECT) {
-                if (parseContext.getParseFieldMatcher().match(currentFieldName, QUERY_FIELD)) {
+                if (QUERY_FIELD.match(currentFieldName)) {
                     query = parseContext.parseInnerQueryBuilder();
-                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, INNER_HITS_FIELD)) {
+                } else if (INNER_HITS_FIELD.match(currentFieldName)) {
                     innerHitBuilder = InnerHitBuilder.fromXContent(parseContext);
                 } else {
                     throw new ParsingException(parser.getTokenLocation(), "[nested] query does not support [" + currentFieldName + "]");
                 }
             } else if (token.isValue()) {
-                if (parseContext.getParseFieldMatcher().match(currentFieldName, PATH_FIELD)) {
+                if (PATH_FIELD.match(currentFieldName)) {
                     path = parser.text();
-                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.BOOST_FIELD)) {
+                } else if (AbstractQueryBuilder.BOOST_FIELD.match(currentFieldName)) {
                     boost = parser.floatValue();
-                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, IGNORE_UNMAPPED_FIELD)) {
+                } else if (IGNORE_UNMAPPED_FIELD.match(currentFieldName)) {
                     ignoreUnmapped = parser.booleanValue();
-                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, SCORE_MODE_FIELD)) {
+                } else if (SCORE_MODE_FIELD.match(currentFieldName)) {
                     scoreMode = HasChildQueryBuilder.parseScoreMode(parser.text());
-                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.NAME_FIELD)) {
+                } else if (AbstractQueryBuilder.NAME_FIELD.match(currentFieldName)) {
                     queryName = parser.text();
                 } else {
                     throw new ParsingException(parser.getTokenLocation(), "[nested] query does not support [" + currentFieldName + "]");
@@ -194,7 +196,7 @@ public class NestedQueryBuilder extends AbstractQueryBuilder<NestedQueryBuilder>
                 .queryName(queryName)
                 .boost(boost);
         if (innerHitBuilder != null) {
-            queryBuilder.innerHit(innerHitBuilder);
+            queryBuilder.innerHit(innerHitBuilder, ignoreUnmapped);
         }
         return queryBuilder;
     }
@@ -232,22 +234,29 @@ public class NestedQueryBuilder extends AbstractQueryBuilder<NestedQueryBuilder>
             throw new IllegalStateException("[" + NAME + "] nested object under path [" + path + "] is not of nested type");
         }
         final BitSetProducer parentFilter;
-        final Query childFilter;
-        final Query innerQuery;
+        Query innerQuery;
         ObjectMapper objectMapper = context.nestedScope().getObjectMapper();
         if (objectMapper == null) {
             parentFilter = context.bitsetFilter(Queries.newNonNestedFilter());
         } else {
             parentFilter = context.bitsetFilter(objectMapper.nestedTypeFilter());
         }
-        childFilter = nestedObjectMapper.nestedTypeFilter();
+
         try {
             context.nestedScope().nextLevel(nestedObjectMapper);
             innerQuery = this.query.toQuery(context);
         } finally {
             context.nestedScope().previousLevel();
         }
-        return new ToParentBlockJoinQuery(Queries.filtered(innerQuery, childFilter), parentFilter, scoreMode);
+
+        // ToParentBlockJoinQuery requires that the inner query only matches documents
+        // in its child space
+        if (new NestedHelper(context.getMapperService()).mightMatchNonNestedDocs(innerQuery, path)) {
+            innerQuery = Queries.filtered(innerQuery, nestedObjectMapper.nestedTypeFilter());
+        }
+
+        return new ESToParentBlockJoinQuery(innerQuery, parentFilter, scoreMode,
+                objectMapper == null ? null : objectMapper.fullPath());
     }
 
     @Override
@@ -255,7 +264,9 @@ public class NestedQueryBuilder extends AbstractQueryBuilder<NestedQueryBuilder>
         QueryBuilder rewrittenQuery = query.rewrite(queryRewriteContext);
         if (rewrittenQuery != query) {
             InnerHitBuilder rewrittenInnerHit = InnerHitBuilder.rewrite(innerHitBuilder, rewrittenQuery);
-            return new NestedQueryBuilder(path, rewrittenQuery, scoreMode, rewrittenInnerHit);
+            NestedQueryBuilder nestedQuery = new NestedQueryBuilder(path, rewrittenQuery, scoreMode, rewrittenInnerHit);
+            nestedQuery.ignoreUnmapped(ignoreUnmapped);
+            return nestedQuery;
         }
         return this;
     }

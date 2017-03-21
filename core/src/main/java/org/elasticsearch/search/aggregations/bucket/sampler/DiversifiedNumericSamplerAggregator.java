@@ -28,7 +28,6 @@ import org.apache.lucene.search.TopDocsCollector;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.search.aggregations.Aggregator;
 import org.elasticsearch.search.aggregations.AggregatorFactories;
-import org.elasticsearch.search.aggregations.bucket.BestDocsDeferringCollector;
 import org.elasticsearch.search.aggregations.bucket.DeferringBucketCollector;
 import org.elasticsearch.search.aggregations.pipeline.PipelineAggregator;
 import org.elasticsearch.search.aggregations.support.ValuesSource;
@@ -43,7 +42,7 @@ public class DiversifiedNumericSamplerAggregator extends SamplerAggregator {
     private ValuesSource.Numeric valuesSource;
     private int maxDocsPerValue;
 
-    public DiversifiedNumericSamplerAggregator(String name, int shardSize, AggregatorFactories factories,
+    DiversifiedNumericSamplerAggregator(String name, int shardSize, AggregatorFactories factories,
             SearchContext context, Aggregator parent, List<PipelineAggregator> pipelineAggregators, Map<String, Object> metaData,
             ValuesSource.Numeric valuesSource, int maxDocsPerValue) throws IOException {
         super(name, shardSize, factories, context, parent, pipelineAggregators, metaData);
@@ -63,7 +62,7 @@ public class DiversifiedNumericSamplerAggregator extends SamplerAggregator {
      * This implementation is only for use with a single bucket aggregation.
      */
     class DiverseDocsDeferringCollector extends BestDocsDeferringCollector {
-        public DiverseDocsDeferringCollector() {
+        DiverseDocsDeferringCollector() {
             super(shardSize, context.bigArrays());
         }
 
@@ -78,7 +77,7 @@ public class DiversifiedNumericSamplerAggregator extends SamplerAggregator {
 
             private SortedNumericDocValues values;
 
-            public ValuesDiversifiedTopDocsCollector(int numHits, int maxHitsPerKey) {
+            ValuesDiversifiedTopDocsCollector(int numHits, int maxHitsPerKey) {
                 super(numHits, maxHitsPerKey);
             }
 

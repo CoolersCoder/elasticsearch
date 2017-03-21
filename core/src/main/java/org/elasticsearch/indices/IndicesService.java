@@ -19,8 +19,6 @@
 
 package org.elasticsearch.indices;
 
-import com.carrotsearch.hppc.cursors.ObjectCursor;
-
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.apache.lucene.index.DirectoryReader;
@@ -41,12 +39,11 @@ import org.elasticsearch.client.Client;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
-import org.elasticsearch.cluster.metadata.MappingMetaData;
 import org.elasticsearch.cluster.routing.RecoverySource;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.CheckedFunction;
 import org.elasticsearch.common.Nullable;
-import org.elasticsearch.common.ParseFieldMatcher;
 import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
@@ -72,6 +69,7 @@ import org.elasticsearch.common.util.iterable.Iterables;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.common.xcontent.XContentParser;
+import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.env.NodeEnvironment;
 import org.elasticsearch.env.ShardLock;
 import org.elasticsearch.env.ShardLockObtainFailedException;
@@ -91,6 +89,7 @@ import org.elasticsearch.index.get.GetStats;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.merge.MergeStats;
+import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryParseContext;
 import org.elasticsearch.index.recovery.RecoveryStats;
 import org.elasticsearch.index.refresh.RefreshStats;
@@ -106,7 +105,6 @@ import org.elasticsearch.indices.breaker.CircuitBreakerService;
 import org.elasticsearch.indices.cluster.IndicesClusterStateService;
 import org.elasticsearch.indices.fielddata.cache.IndicesFieldDataCache;
 import org.elasticsearch.indices.mapper.MapperRegistry;
-import org.elasticsearch.indices.query.IndicesQueriesRegistry;
 import org.elasticsearch.indices.recovery.PeerRecoveryTargetService;
 import org.elasticsearch.indices.recovery.RecoveryState;
 import org.elasticsearch.plugins.PluginsService;
@@ -156,7 +154,6 @@ public class IndicesService extends AbstractLifecycleComponent
     private final NamedXContentRegistry xContentRegistry;
     private final TimeValue shardsClosedTimeout;
     private final AnalysisRegistry analysisRegistry;
-    private final IndicesQueriesRegistry indicesQueriesRegistry;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
     private final IndexScopedSettings indexScopeSetting;
     private final IndicesFieldDataCache indicesFieldDataCache;
@@ -187,7 +184,7 @@ public class IndicesService extends AbstractLifecycleComponent
 
     public IndicesService(Settings settings, PluginsService pluginsService, NodeEnvironment nodeEnv, NamedXContentRegistry xContentRegistry,
                           ClusterSettings clusterSettings, AnalysisRegistry analysisRegistry,
-                          IndicesQueriesRegistry indicesQueriesRegistry, IndexNameExpressionResolver indexNameExpressionResolver,
+                          IndexNameExpressionResolver indexNameExpressionResolver,
                           MapperRegistry mapperRegistry, NamedWriteableRegistry namedWriteableRegistry,
                           ThreadPool threadPool, IndexScopedSettings indexScopedSettings, CircuitBreakerService circuitBreakerService,
                           BigArrays bigArrays, ScriptService scriptService, ClusterService clusterService, Client client,
@@ -199,7 +196,6 @@ public class IndicesService extends AbstractLifecycleComponent
         this.xContentRegistry = xContentRegistry;
         this.shardsClosedTimeout = settings.getAsTime(INDICES_SHARDS_CLOSED_TIMEOUT, new TimeValue(1, TimeUnit.DAYS));
         this.analysisRegistry = analysisRegistry;
-        this.indicesQueriesRegistry = indicesQueriesRegistry;
         this.indexNameExpressionResolver = indexNameExpressionResolver;
         this.indicesRequestCache = new IndicesRequestCache(settings);
         this.indicesQueryCache = new IndicesQueryCache(settings);
@@ -451,7 +447,6 @@ public class IndicesService extends AbstractLifecycleComponent
             bigArrays,
             threadPool,
             scriptService,
-            indicesQueriesRegistry,
             clusterService,
             client,
             indicesQueryCache,
@@ -515,7 +510,7 @@ public class IndicesService extends AbstractLifecycleComponent
                     client.admin().indices().preparePutMapping()
                         .setConcreteIndex(shardRouting.index()) // concrete index - no name clash, it uses uuid
                         .setType(type)
-                        .setSource(mapping.source().string())
+                        .setSource(mapping.source().string(), XContentType.JSON)
                         .get();
                 } catch (IOException ex) {
                     throw new ElasticsearchException("failed to stringify mapping source", ex);
@@ -609,7 +604,7 @@ public class IndicesService extends AbstractLifecycleComponent
                                                     "the cluster state [" + index.getIndexUUID() + "] [" + metaData.getIndexUUID() + "]");
                 }
                 deleteIndexStore(reason, metaData, clusterState);
-            } catch (IOException e) {
+            } catch (Exception e) {
                 logger.warn((Supplier<?>) () -> new ParameterizedMessage("[{}] failed to delete unassigned index (reason [{}])", metaData.getIndex(), reason), e);
             }
         }
@@ -771,14 +766,14 @@ public class IndicesService extends AbstractLifecycleComponent
             final IndexMetaData metaData;
             try {
                 metaData = metaStateService.loadIndexState(index);
-            } catch (IOException e) {
+            } catch (Exception e) {
                 logger.warn((Supplier<?>) () -> new ParameterizedMessage("[{}] failed to load state file from a stale deleted index, folders will be left on disk", index), e);
                 return null;
             }
             final IndexSettings indexSettings = buildIndexSettings(metaData);
             try {
                 deleteIndexStoreIfDeletionAllowed("stale deleted index", index, indexSettings, ALWAYS_TRUE);
-            } catch (IOException e) {
+            } catch (Exception e) {
                 // we just warn about the exception here because if deleteIndexStoreIfDeletionAllowed
                 // throws an exception, it gets added to the list of pending deletes to be tried again
                 logger.warn((Supplier<?>) () -> new ParameterizedMessage("[{}] failed to delete index on disk", metaData.getIndex()), e);
@@ -886,7 +881,7 @@ public class IndicesService extends AbstractLifecycleComponent
         /**
          * Creates a new pending delete of an index
          */
-        public PendingDelete(ShardId shardId, IndexSettings settings) {
+        PendingDelete(ShardId shardId, IndexSettings settings) {
             this.index = shardId.getIndex();
             this.shardId = shardId.getId();
             this.settings = settings;
@@ -896,7 +891,7 @@ public class IndicesService extends AbstractLifecycleComponent
         /**
          * Creates a new pending delete of a shard
          */
-        public PendingDelete(Index index, IndexSettings settings) {
+        PendingDelete(Index index, IndexSettings settings) {
             this.index = index;
             this.shardId = -1;
             this.settings = settings;
@@ -1017,13 +1012,6 @@ public class IndicesService extends AbstractLifecycleComponent
         return numUncompletedDeletes.get() > 0;
     }
 
-    /**
-     * Returns this nodes {@link IndicesQueriesRegistry}
-     */
-    public IndicesQueriesRegistry getIndicesQueryRegistry() {
-        return indicesQueriesRegistry;
-    }
-
     public AnalysisRegistry getAnalysis() {
         return analysisRegistry;
     }
@@ -1043,7 +1031,7 @@ public class IndicesService extends AbstractLifecycleComponent
         private final AtomicBoolean closed = new AtomicBoolean(false);
         private final IndicesRequestCache requestCache;
 
-        public CacheCleaner(IndicesFieldDataCache cache, IndicesRequestCache requestCache, Logger logger, ThreadPool threadPool, TimeValue interval) {
+        CacheCleaner(IndicesFieldDataCache cache, IndicesRequestCache requestCache, Logger logger, ThreadPool threadPool, TimeValue interval) {
             this.cache = cache;
             this.requestCache = requestCache;
             this.logger = logger;
@@ -1084,8 +1072,6 @@ public class IndicesService extends AbstractLifecycleComponent
     }
 
 
-    private static final Set<SearchType> CACHEABLE_SEARCH_TYPES = EnumSet.of(SearchType.QUERY_THEN_FETCH, SearchType.QUERY_AND_FETCH);
-
     /**
      * Can the shard request be cached at all?
      */
@@ -1095,7 +1081,7 @@ public class IndicesService extends AbstractLifecycleComponent
         // on the overridden statistics. So if you ran two queries on the same index with different stats
         // (because an other shard was updated) you would get wrong results because of the scores
         // (think about top_hits aggs or scripts using the score)
-        if (!CACHEABLE_SEARCH_TYPES.contains(context.searchType())) {
+        if (SearchType.QUERY_THEN_FETCH != context.searchType()) {
             return false;
         }
         IndexSettings settings = context.indexShard().indexSettings();
@@ -1147,17 +1133,28 @@ public class IndicesService extends AbstractLifecycleComponent
             queryPhase.execute(context);
             try {
                 context.queryResult().writeToNoId(out);
+
             } catch (IOException e) {
                 throw new AssertionError("Could not serialize response", e);
             }
             loadedFromCache[0] = false;
         });
+
         if (loadedFromCache[0]) {
             // restore the cached query result into the context
             final QuerySearchResult result = context.queryResult();
             StreamInput in = new NamedWriteableAwareStreamInput(bytesReference.streamInput(), namedWriteableRegistry);
             result.readFromWithId(context.id(), in);
             result.shardTarget(context.shardTarget());
+        } else if (context.queryResult().searchTimedOut()) {
+            // we have to invalidate the cache entry if we cached a query result form a request that timed out.
+            // we can't really throw exceptions in the loading part to signal a timed out search to the outside world since if there are
+            // multiple requests that wait for the cache entry to be calculated they'd fail all with the same exception.
+            // instead we all caching such a result for the time being, return the timed out result for all other searches with that cache
+            // key invalidate the result in the thread that caused the timeout. This will end up to be simpler and eventually correct since
+            // running a search that times out concurrently will likely timeout again if it's run while we have this `stale` result in the
+            // cache. One other option is to not cache requests with a timeout at all...
+            indicesRequestCache.invalidate(new IndexShardCacheEntity(context.indexShard()), directoryReader, request.cacheKey());
         }
     }
 
@@ -1266,9 +1263,9 @@ public class IndicesService extends AbstractLifecycleComponent
     public AliasFilter buildAliasFilter(ClusterState state, String index, String... expressions) {
         /* Being static, parseAliasFilter doesn't have access to whatever guts it needs to parse a query. Instead of passing in a bunch
          * of dependencies we pass in a function that can perform the parsing. */
-        ShardSearchRequest.FilterParser filterParser = bytes -> {
+        CheckedFunction<byte[], QueryBuilder, IOException> filterParser = bytes -> {
             try (XContentParser parser = XContentFactory.xContent(bytes).createParser(xContentRegistry, bytes)) {
-                return new QueryParseContext(indicesQueriesRegistry, parser, new ParseFieldMatcher(settings)).parseInnerQueryBuilder();
+                return new QueryParseContext(parser).parseInnerQueryBuilder();
             }
         };
         String[] aliases = indexNameExpressionResolver.filteringAliases(state, index, expressions);

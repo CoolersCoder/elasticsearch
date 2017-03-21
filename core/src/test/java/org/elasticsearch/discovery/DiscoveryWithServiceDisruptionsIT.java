@@ -24,6 +24,7 @@ import org.apache.logging.log4j.util.Supplier;
 import org.apache.lucene.index.CorruptIndexException;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.action.DocWriteResponse;
+import org.elasticsearch.action.NoShardAvailableActionException;
 import org.elasticsearch.action.get.GetResponse;
 import org.elasticsearch.action.index.IndexRequestBuilder;
 import org.elasticsearch.action.index.IndexResponse;
@@ -39,7 +40,6 @@ import org.elasticsearch.cluster.node.DiscoveryNodes;
 import org.elasticsearch.cluster.routing.Murmur3HashFunction;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.cluster.routing.ShardRoutingState;
-import org.elasticsearch.cluster.routing.allocation.command.MoveAllocationCommand;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.Priority;
@@ -47,6 +47,7 @@ import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.discovery.zen.ElectMasterService;
 import org.elasticsearch.discovery.zen.FaultDetection;
 import org.elasticsearch.discovery.zen.MembershipAction;
@@ -55,6 +56,7 @@ import org.elasticsearch.discovery.zen.UnicastZenPing;
 import org.elasticsearch.discovery.zen.ZenDiscovery;
 import org.elasticsearch.discovery.zen.ZenPing;
 import org.elasticsearch.env.NodeEnvironment;
+import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.indices.store.IndicesStoreIntegrationIT;
 import org.elasticsearch.monitor.jvm.HotThreads;
 import org.elasticsearch.plugins.Plugin;
@@ -64,7 +66,6 @@ import org.elasticsearch.test.ESIntegTestCase.Scope;
 import org.elasticsearch.test.InternalTestCluster;
 import org.elasticsearch.test.discovery.ClusterDiscoveryConfiguration;
 import org.elasticsearch.test.discovery.TestZenDiscovery;
-import org.elasticsearch.test.disruption.BlockClusterStateProcessing;
 import org.elasticsearch.test.disruption.IntermittentLongGCDisruption;
 import org.elasticsearch.test.disruption.LongGCDisruption;
 import org.elasticsearch.test.disruption.NetworkDisruption;
@@ -477,8 +478,9 @@ public class DiscoveryWithServiceDisruptionsIT extends ESIntegTestCase {
      * <p>
      * This test is a superset of tests run in the Jepsen test suite, with the exception of versioned updates
      */
-    @TestLogging("_root:DEBUG,org.elasticsearch.action.index:TRACE,org.elasticsearch.action.get:TRACE,discovery:TRACE,org.elasticsearch.cluster.service:TRACE,"
-        + "org.elasticsearch.indices.recovery:TRACE,org.elasticsearch.indices.cluster:TRACE")
+    @TestLogging("_root:DEBUG,org.elasticsearch.action.bulk:TRACE,org.elasticsearch.action.get:TRACE,discovery:TRACE," +
+        "org.elasticsearch.cluster.service:TRACE,org.elasticsearch.indices.recovery:TRACE," +
+        "org.elasticsearch.indices.cluster:TRACE,org.elasticsearch.index.shard:TRACE")
     public void testAckedIndexing() throws Exception {
 
         final int seconds = !(TEST_NIGHTLY && rarely()) ? 1 : 5;
@@ -490,6 +492,7 @@ public class DiscoveryWithServiceDisruptionsIT extends ESIntegTestCase {
             .setSettings(Settings.builder()
                 .put(IndexMetaData.SETTING_NUMBER_OF_SHARDS, 1 + randomInt(2))
                 .put(IndexMetaData.SETTING_NUMBER_OF_REPLICAS, randomInt(2))
+                .put(IndexSettings.INDEX_SEQ_NO_CHECKPOINT_SYNC_INTERVAL.getKey(),  randomBoolean() ? "5s" : "200ms")
             ));
         ensureGreen();
 
@@ -526,7 +529,7 @@ public class DiscoveryWithServiceDisruptionsIT extends ESIntegTestCase {
                                 int shard = Math.floorMod(Murmur3HashFunction.hash(id), numPrimaries);
                                 logger.trace("[{}] indexing id [{}] through node [{}] targeting shard [{}]", name, id, node, shard);
                                 IndexResponse response =
-                                    client.prepareIndex("test", "type", id).setSource("{}").setTimeout(timeout).get(timeout);
+                                    client.prepareIndex("test", "type", id).setSource("{}", XContentType.JSON).setTimeout(timeout).get(timeout);
                                 assertEquals(DocWriteResponse.Result.CREATED, response.getResult());
                                 ackedDocs.put(id, node);
                                 logger.trace("[{}] indexed id [{}] through node [{}]", name, id, node);
@@ -585,17 +588,19 @@ public class DiscoveryWithServiceDisruptionsIT extends ESIntegTestCase {
                 ensureGreen("test");
 
                 logger.info("validating successful docs");
-                for (String node : nodes) {
-                    try {
-                        logger.debug("validating through node [{}] ([{}] acked docs)", node, ackedDocs.size());
-                        for (String id : ackedDocs.keySet()) {
-                            assertTrue("doc [" + id + "] indexed via node [" + ackedDocs.get(id) + "] not found",
-                                client(node).prepareGet("test", "type", id).setPreference("_local").get().isExists());
+                assertBusy(() -> {
+                    for (String node : nodes) {
+                        try {
+                            logger.debug("validating through node [{}] ([{}] acked docs)", node, ackedDocs.size());
+                            for (String id : ackedDocs.keySet()) {
+                                assertTrue("doc [" + id + "] indexed via node [" + ackedDocs.get(id) + "] not found",
+                                    client(node).prepareGet("test", "type", id).setPreference("_local").get().isExists());
+                            }
+                        } catch (AssertionError | NoShardAvailableActionException e) {
+                            throw new AssertionError(e.getMessage() + " (checked via node [" + node + "]", e);
                         }
-                    } catch (AssertionError e) {
-                        throw new AssertionError(e.getMessage() + " (checked via node [" + node + "]", e);
                     }
-                }
+                }, 30, TimeUnit.SECONDS);
 
                 logger.info("done validating (iteration [{}])", iter);
             }
@@ -1116,25 +1121,14 @@ public class DiscoveryWithServiceDisruptionsIT extends ESIntegTestCase {
         final String node_2 = internalCluster().startDataOnlyNode();
         List<IndexRequestBuilder> indexRequestBuilderList = new ArrayList<>();
         for (int i = 0; i < 100; i++) {
-            indexRequestBuilderList.add(client().prepareIndex().setIndex("test").setType("doc").setSource("{\"int_field\":1}"));
+            indexRequestBuilderList.add(client().prepareIndex().setIndex("test").setType("doc")
+                .setSource("{\"int_field\":1}", XContentType.JSON));
         }
         indexRandom(true, indexRequestBuilderList);
-        SingleNodeDisruption disruption = new BlockClusterStateProcessing(node_2, random());
 
-        internalCluster().setDisruptionScheme(disruption);
-        MockTransportService transportServiceNode2 = (MockTransportService) internalCluster().getInstance(TransportService.class, node_2);
-        CountDownLatch beginRelocationLatch = new CountDownLatch(1);
-        CountDownLatch endRelocationLatch = new CountDownLatch(1);
-        transportServiceNode2.addTracer(new IndicesStoreIntegrationIT.ReclocationStartEndTracer(logger, beginRelocationLatch,
-            endRelocationLatch));
-        internalCluster().client().admin().cluster().prepareReroute().add(new MoveAllocationCommand("test", 0, node_1, node_2)).get();
-        // wait for relocation to start
-        beginRelocationLatch.await();
-        disruption.startDisrupting();
-        // wait for relocation to finish
-        endRelocationLatch.await();
+        IndicesStoreIntegrationIT.relocateAndBlockCompletion(logger, "test", 0, node_1, node_2);
         // now search for the documents and see if we get a reply
-        assertThat(client().prepareSearch().setSize(0).get().getHits().totalHits(), equalTo(100L));
+        assertThat(client().prepareSearch().setSize(0).get().getHits().getTotalHits(), equalTo(100L));
     }
 
     public void testIndexImportedFromDataOnlyNodesIfMasterLostDataFolder() throws Exception {

@@ -20,6 +20,7 @@
 package org.elasticsearch;
 
 import org.apache.lucene.analysis.en.PorterStemFilterFactory;
+import org.apache.lucene.analysis.miscellaneous.WordDelimiterGraphFilterFactory;
 import org.apache.lucene.analysis.reverse.ReverseStringFilterFactory;
 import org.apache.lucene.analysis.snowball.SnowballPorterFilterFactory;
 import org.apache.lucene.analysis.util.CharFilterFactory;
@@ -42,6 +43,7 @@ import org.elasticsearch.index.analysis.DelimitedPayloadTokenFilterFactory;
 import org.elasticsearch.index.analysis.EdgeNGramTokenFilterFactory;
 import org.elasticsearch.index.analysis.EdgeNGramTokenizerFactory;
 import org.elasticsearch.index.analysis.ElisionTokenFilterFactory;
+import org.elasticsearch.index.analysis.FlattenGraphTokenFilterFactory;
 import org.elasticsearch.index.analysis.GermanNormalizationFilterFactory;
 import org.elasticsearch.index.analysis.GermanStemTokenFilterFactory;
 import org.elasticsearch.index.analysis.HindiNormalizationFilterFactory;
@@ -82,6 +84,7 @@ import org.elasticsearch.index.analysis.StandardTokenizerFactory;
 import org.elasticsearch.index.analysis.StemmerOverrideTokenFilterFactory;
 import org.elasticsearch.index.analysis.StemmerTokenFilterFactory;
 import org.elasticsearch.index.analysis.StopTokenFilterFactory;
+import org.elasticsearch.index.analysis.SynonymGraphTokenFilterFactory;
 import org.elasticsearch.index.analysis.SynonymTokenFilterFactory;
 import org.elasticsearch.index.analysis.ThaiTokenizerFactory;
 import org.elasticsearch.index.analysis.TrimTokenFilterFactory;
@@ -144,6 +147,10 @@ public class AnalysisFactoryTestCase extends ESTestCase {
 
         // this one "seems to mess up offsets". probably shouldn't be a tokenizer...
         .put("wikipedia",     Void.class)
+
+        // TODO: expose these
+        .put("simplepattern",    Void.class)
+        .put("simplepatternsplit",    Void.class)
         .immutableMap();
 
     static final Map<PreBuiltTokenizers, Class<?>> PREBUILT_TOKENIZERS;
@@ -240,12 +247,15 @@ public class AnalysisFactoryTestCase extends ESTestCase {
         .put("stop",                      StopTokenFilterFactory.class)
         .put("swedishlightstem",          StemmerTokenFilterFactory.class)
         .put("synonym",                   SynonymTokenFilterFactory.class)
+        .put("synonymgraph",              SynonymGraphTokenFilterFactory.class)
         .put("trim",                      TrimTokenFilterFactory.class)
         .put("truncate",                  TruncateTokenFilterFactory.class)
         .put("turkishlowercase",          LowerCaseTokenFilterFactory.class)
         .put("type",                      KeepTypesFilterFactory.class)
         .put("uppercase",                 UpperCaseTokenFilterFactory.class)
         .put("worddelimiter",             WordDelimiterTokenFilterFactory.class)
+        .put("worddelimitergraph",        WordDelimiterGraphFilterFactory.class)
+        .put("flattengraph",              FlattenGraphTokenFilterFactory.class)
 
         // TODO: these tokenfilters are not yet exposed: useful?
 

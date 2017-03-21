@@ -26,7 +26,6 @@ import org.elasticsearch.common.xcontent.json.JsonXContent;
 import org.elasticsearch.index.mapper.DynamicTemplate.XContentFieldType;
 import org.elasticsearch.test.ESTestCase;
 
-import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -44,20 +43,21 @@ public class DynamicTemplateTests extends ESTestCase {
         assertEquals("Illegal dynamic template parameter: [random_param]", e.getMessage());
     }
 
-    public void testParseUnknownMatchType() throws IOException {
+    public void testParseUnknownMatchType() {
         Map<String, Object> templateDef = new HashMap<>();
         templateDef.put("match_mapping_type", "short");
         templateDef.put("mapping", Collections.singletonMap("store", true));
         // if a wrong match type is specified, we ignore the template
         assertNull(DynamicTemplate.parse("my_template", templateDef, Version.V_5_0_0_alpha5));
-
+        assertWarnings("match_mapping_type [short] is invalid and will be ignored: No field type matched on [short], " +
+                "possible values are [object, string, long, double, boolean, date, binary]");
         Map<String, Object> templateDef2 = new HashMap<>();
         templateDef2.put("match_mapping_type", "text");
         templateDef2.put("mapping", Collections.singletonMap("store", true));
         // if a wrong match type is specified, we ignore the template
         IllegalArgumentException e = expectThrows(IllegalArgumentException.class,
                 () -> DynamicTemplate.parse("my_template", templateDef2, Version.V_6_0_0_alpha1_UNRELEASED));
-        assertEquals("No xcontent type matched on [text], possible values are [object, string, long, double, boolean, date, binary]",
+        assertEquals("No field type matched on [text], possible values are [object, string, long, double, boolean, date, binary]",
                 e.getMessage());
     }
 

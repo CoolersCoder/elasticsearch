@@ -20,8 +20,10 @@
 package org.elasticsearch.index.query;
 
 import com.carrotsearch.randomizedtesting.generators.RandomPicks;
+
 import org.apache.lucene.document.IntPoint;
 import org.apache.lucene.document.LongPoint;
+import org.apache.lucene.search.IndexOrDocValuesQuery;
 import org.apache.lucene.search.PointRangeQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TermRangeQuery;
@@ -133,6 +135,8 @@ public class RangeQueryBuilderTests extends AbstractQueryTestCase<RangeQueryBuil
             assertThat(termRangeQuery.includesLower(), equalTo(queryBuilder.includeLower()));
             assertThat(termRangeQuery.includesUpper(), equalTo(queryBuilder.includeUpper()));
         } else if (queryBuilder.fieldName().equals(DATE_FIELD_NAME)) {
+            assertThat(query, instanceOf(IndexOrDocValuesQuery.class));
+            query = ((IndexOrDocValuesQuery) query).getIndexQuery();
             assertThat(query, instanceOf(PointRangeQuery.class));
             MapperService mapperService = context.getQueryShardContext().getMapperService();
             MappedFieldType mappedFieldType = mapperService.fullName(DATE_FIELD_NAME);
@@ -176,6 +180,8 @@ public class RangeQueryBuilderTests extends AbstractQueryTestCase<RangeQueryBuil
             }
             assertEquals(LongPoint.newRangeQuery(DATE_FIELD_NAME, minLong, maxLong), query);
         } else if (queryBuilder.fieldName().equals(INT_FIELD_NAME)) {
+            assertThat(query, instanceOf(IndexOrDocValuesQuery.class));
+            query = ((IndexOrDocValuesQuery) query).getIndexQuery();
             assertThat(query, instanceOf(PointRangeQuery.class));
             Integer min = (Integer) queryBuilder.from();
             Integer max = (Integer) queryBuilder.to();
@@ -239,6 +245,8 @@ public class RangeQueryBuilderTests extends AbstractQueryTestCase<RangeQueryBuil
         assumeTrue("test runs only when at least a type is registered", getCurrentTypes().length > 0);
         Query parsedQuery = rangeQuery(INT_FIELD_NAME).from(23).to(54).includeLower(true).includeUpper(false).toQuery(createShardContext());
         // since age is automatically registered in data, we encode it as numeric
+        assertThat(parsedQuery, instanceOf(IndexOrDocValuesQuery.class));
+        parsedQuery = ((IndexOrDocValuesQuery) parsedQuery).getIndexQuery();
         assertThat(parsedQuery, instanceOf(PointRangeQuery.class));
         assertEquals(IntPoint.newRangeQuery(INT_FIELD_NAME, 23, 53), parsedQuery);
     }
@@ -256,6 +264,8 @@ public class RangeQueryBuilderTests extends AbstractQueryTestCase<RangeQueryBuil
                 "    }\n" +
                 "}";
         Query parsedQuery = parseQuery(query).toQuery(createShardContext());
+        assertThat(parsedQuery, instanceOf(IndexOrDocValuesQuery.class));
+        parsedQuery = ((IndexOrDocValuesQuery) parsedQuery).getIndexQuery();
         assertThat(parsedQuery, instanceOf(PointRangeQuery.class));
 
         assertEquals(LongPoint.newRangeQuery(DATE_FIELD_NAME,
@@ -287,6 +297,8 @@ public class RangeQueryBuilderTests extends AbstractQueryTestCase<RangeQueryBuil
                 "    }\n" +
                 "}\n";
         Query parsedQuery = parseQuery(query).toQuery(createShardContext());
+        assertThat(parsedQuery, instanceOf(IndexOrDocValuesQuery.class));
+        parsedQuery = ((IndexOrDocValuesQuery) parsedQuery).getIndexQuery();
         assertThat(parsedQuery, instanceOf(PointRangeQuery.class));
         assertEquals(LongPoint.newRangeQuery(DATE_FIELD_NAME,
                 DateTime.parse("2014-11-01T00:00:00.000+00").getMillis(),
@@ -302,6 +314,8 @@ public class RangeQueryBuilderTests extends AbstractQueryTestCase<RangeQueryBuil
                 "    }\n" +
                 "}";
         parsedQuery = parseQuery(query).toQuery(createShardContext());
+        assertThat(parsedQuery, instanceOf(IndexOrDocValuesQuery.class));
+        parsedQuery = ((IndexOrDocValuesQuery) parsedQuery).getIndexQuery();
         assertThat(parsedQuery, instanceOf(PointRangeQuery.class));
         assertEquals(LongPoint.newRangeQuery(DATE_FIELD_NAME,
                 DateTime.parse("2014-11-30T23:59:59.999+00").getMillis() + 1,
@@ -322,6 +336,8 @@ public class RangeQueryBuilderTests extends AbstractQueryTestCase<RangeQueryBuil
                 "}";
         QueryShardContext context = createShardContext();
         Query parsedQuery = parseQuery(query).toQuery(context);
+        assertThat(parsedQuery, instanceOf(IndexOrDocValuesQuery.class));
+        parsedQuery = ((IndexOrDocValuesQuery) parsedQuery).getIndexQuery();
         assertThat(parsedQuery, instanceOf(PointRangeQuery.class));
         // TODO what else can we assert
 
@@ -409,6 +425,31 @@ public class RangeQueryBuilderTests extends AbstractQueryTestCase<RangeQueryBuil
         assertThat(rewrittenRange.fieldName(), equalTo(fieldName));
         assertThat(rewrittenRange.from(), equalTo(null));
         assertThat(rewrittenRange.to(), equalTo(null));
+    }
+
+    public void testRewriteDateToMatchAllWithTimezoneAndFormat() throws IOException {
+        String fieldName = randomAsciiOfLengthBetween(1, 20);
+        RangeQueryBuilder query = new RangeQueryBuilder(fieldName) {
+            @Override
+            protected MappedFieldType.Relation getRelation(QueryRewriteContext queryRewriteContext) throws IOException {
+                return Relation.WITHIN;
+            }
+        };
+        DateTime queryFromValue = new DateTime(2015, 1, 1, 0, 0, 0, ISOChronology.getInstanceUTC());
+        DateTime queryToValue = new DateTime(2016, 1, 1, 0, 0, 0, ISOChronology.getInstanceUTC());
+        query.from(queryFromValue);
+        query.to(queryToValue);
+        query.timeZone(randomFrom(DateTimeZone.getAvailableIDs()));
+        query.format("yyyy-MM-dd");
+        QueryShardContext queryShardContext = createShardContext();
+        QueryBuilder rewritten = query.rewrite(queryShardContext);
+        assertThat(rewritten, instanceOf(RangeQueryBuilder.class));
+        RangeQueryBuilder rewrittenRange = (RangeQueryBuilder) rewritten;
+        assertThat(rewrittenRange.fieldName(), equalTo(fieldName));
+        assertThat(rewrittenRange.from(), equalTo(null));
+        assertThat(rewrittenRange.to(), equalTo(null));
+        assertThat(rewrittenRange.timeZone(), equalTo(null));
+        assertThat(rewrittenRange.format(), equalTo(null));
     }
 
     public void testRewriteDateToMatchNone() throws IOException {

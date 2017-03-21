@@ -22,10 +22,13 @@ package org.elasticsearch.action.update;
 import org.elasticsearch.Version;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.common.bytes.BytesArray;
+import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.Streamable;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.common.xcontent.XContentHelper;
+import org.elasticsearch.common.xcontent.XContentParser;
+import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.common.xcontent.json.JsonXContent;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.index.get.GetResult;
@@ -38,6 +41,7 @@ import org.elasticsearch.script.ScriptService;
 import org.elasticsearch.script.ScriptSettings;
 import org.elasticsearch.script.ScriptType;
 import org.elasticsearch.test.ESTestCase;
+import org.elasticsearch.test.RandomObjects;
 import org.elasticsearch.watcher.ResourceWatcherService;
 
 import java.io.IOException;
@@ -48,13 +52,16 @@ import java.util.Map;
 import java.util.function.Function;
 
 import static org.elasticsearch.common.xcontent.XContentFactory.jsonBuilder;
+import static org.elasticsearch.common.xcontent.XContentHelper.toXContent;
+import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertToXContentEquivalent;
 import static org.hamcrest.Matchers.arrayContaining;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.notNullValue;
 
 public class UpdateRequestTests extends ESTestCase {
-    public void testUpdateRequest() throws Exception {
+
+    public void testFromXContent() throws Exception {
         UpdateRequest request = new UpdateRequest("test", "type", "1");
         // simple script
         request.fromXContent(createParser(XContentFactory.jsonBuilder()
@@ -144,7 +151,8 @@ public class UpdateRequestTests extends ESTestCase {
         assertThat(params, notNullValue());
         assertThat(params.size(), equalTo(1));
         assertThat(params.get("param1").toString(), equalTo("value1"));
-        Map<String, Object> upsertDoc = XContentHelper.convertToMap(request.upsertRequest().source(), true).v2();
+        Map<String, Object> upsertDoc =
+            XContentHelper.convertToMap(request.upsertRequest().source(), true, request.upsertRequest().getContentType()).v2();
         assertThat(upsertDoc.get("field1").toString(), equalTo("value1"));
         assertThat(((Map) upsertDoc.get("compound")).get("field2").toString(), equalTo("value2"));
 
@@ -171,7 +179,7 @@ public class UpdateRequestTests extends ESTestCase {
         assertThat(params, notNullValue());
         assertThat(params.size(), equalTo(1));
         assertThat(params.get("param1").toString(), equalTo("value1"));
-        upsertDoc = XContentHelper.convertToMap(request.upsertRequest().source(), true).v2();
+        upsertDoc = XContentHelper.convertToMap(request.upsertRequest().source(), true, request.upsertRequest().getContentType()).v2();
         assertThat(upsertDoc.get("field1").toString(), equalTo("value1"));
         assertThat(((Map) upsertDoc.get("compound")).get("field2").toString(), equalTo("value2"));
 
@@ -292,7 +300,7 @@ public class UpdateRequestTests extends ESTestCase {
                 .upsert(indexRequest)
                 .script(new Script(ScriptType.INLINE, "mock", "ctx._source.update_timestamp = ctx._now", Collections.emptyMap()))
                 .scriptedUpsert(true);
-            long nowInMillis = randomPositiveLong();
+            long nowInMillis = randomNonNegativeLong();
             // We simulate that the document is not existing yet
             GetResult getResult = new GetResult("test", "type1", "2", 0, false, null, null);
             UpdateHelper.Result result = updateHelper.prepare(new ShardId("test", "_na_", 0), updateRequest, getResult, () -> nowInMillis);
@@ -312,5 +320,84 @@ public class UpdateRequestTests extends ESTestCase {
             Streamable action = result.action();
             assertThat(action, instanceOf(IndexRequest.class));
         }
+    }
+
+    public void testToAndFromXContent() throws IOException {
+        UpdateRequest updateRequest = new UpdateRequest();
+        updateRequest.detectNoop(randomBoolean());
+
+        if (randomBoolean()) {
+            XContentType xContentType = randomFrom(XContentType.values());
+            BytesReference source = RandomObjects.randomSource(random(), xContentType);
+            updateRequest.doc(new IndexRequest().source(source, xContentType));
+            updateRequest.docAsUpsert(randomBoolean());
+        } else {
+            ScriptType scriptType = randomFrom(ScriptType.values());
+            String scriptLang = (scriptType != ScriptType.STORED) ? randomAsciiOfLength(10) : null;
+            String scriptIdOrCode = randomAsciiOfLength(10);
+            int nbScriptParams = randomIntBetween(0, 5);
+            Map<String, Object> scriptParams = new HashMap<>(nbScriptParams);
+            for (int i = 0; i < nbScriptParams; i++) {
+                scriptParams.put(randomAsciiOfLength(5), randomAsciiOfLength(5));
+            }
+            updateRequest.script(new Script(scriptType, scriptLang, scriptIdOrCode, scriptParams));
+            updateRequest.scriptedUpsert(randomBoolean());
+        }
+        if (randomBoolean()) {
+            XContentType xContentType = randomFrom(XContentType.values());
+            BytesReference source = RandomObjects.randomSource(random(), xContentType);
+            updateRequest.upsert(new IndexRequest().source(source, xContentType));
+        }
+        if (randomBoolean()) {
+            String[] fields = new String[randomIntBetween(0, 5)];
+            for (int i = 0; i < fields.length; i++) {
+                fields[i] = randomAsciiOfLength(5);
+            }
+            updateRequest.fields(fields);
+        }
+        if (randomBoolean()) {
+            if (randomBoolean()) {
+                updateRequest.fetchSource(randomBoolean());
+            } else {
+                String[] includes = new String[randomIntBetween(0, 5)];
+                for (int i = 0; i < includes.length; i++) {
+                    includes[i] = randomAsciiOfLength(5);
+                }
+                String[] excludes = new String[randomIntBetween(0, 5)];
+                for (int i = 0; i < excludes.length; i++) {
+                    excludes[i] = randomAsciiOfLength(5);
+                }
+                if (randomBoolean()) {
+                    updateRequest.fetchSource(includes, excludes);
+                }
+            }
+        }
+
+        XContentType xContentType = randomFrom(XContentType.values());
+        boolean humanReadable = randomBoolean();
+        BytesReference originalBytes = XContentHelper.toXContent(updateRequest, xContentType, humanReadable);
+
+        if (randomBoolean()) {
+            try (XContentParser parser = createParser(xContentType.xContent(), originalBytes)) {
+                originalBytes = shuffleXContent(parser, randomBoolean()).bytes();
+            }
+        }
+
+        UpdateRequest parsedUpdateRequest = new UpdateRequest();
+        try (XContentParser parser = createParser(xContentType.xContent(), originalBytes)) {
+            parsedUpdateRequest.fromXContent(parser);
+            assertNull(parser.nextToken());
+        }
+
+        assertEquals(updateRequest.detectNoop(), parsedUpdateRequest.detectNoop());
+        assertEquals(updateRequest.docAsUpsert(), parsedUpdateRequest.docAsUpsert());
+        assertEquals(updateRequest.docAsUpsert(), parsedUpdateRequest.docAsUpsert());
+        assertEquals(updateRequest.script(), parsedUpdateRequest.script());
+        assertEquals(updateRequest.scriptedUpsert(), parsedUpdateRequest.scriptedUpsert());
+        assertArrayEquals(updateRequest.fields(), parsedUpdateRequest.fields());
+        assertEquals(updateRequest.fetchSource(), parsedUpdateRequest.fetchSource());
+
+        BytesReference finalBytes = toXContent(parsedUpdateRequest, xContentType, humanReadable);
+        assertToXContentEquivalent(originalBytes, finalBytes, xContentType);
     }
 }

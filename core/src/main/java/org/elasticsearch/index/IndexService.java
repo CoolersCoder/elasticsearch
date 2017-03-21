@@ -44,7 +44,6 @@ import org.elasticsearch.index.cache.IndexCache;
 import org.elasticsearch.index.cache.bitset.BitsetFilterCache;
 import org.elasticsearch.index.cache.query.QueryCache;
 import org.elasticsearch.index.engine.Engine;
-import org.elasticsearch.index.engine.EngineClosedException;
 import org.elasticsearch.index.engine.EngineFactory;
 import org.elasticsearch.index.fielddata.IndexFieldDataCache;
 import org.elasticsearch.index.fielddata.IndexFieldDataService;
@@ -68,7 +67,6 @@ import org.elasticsearch.indices.breaker.CircuitBreakerService;
 import org.elasticsearch.indices.cluster.IndicesClusterStateService;
 import org.elasticsearch.indices.fielddata.cache.IndicesFieldDataCache;
 import org.elasticsearch.indices.mapper.MapperRegistry;
-import org.elasticsearch.indices.query.IndicesQueriesRegistry;
 import org.elasticsearch.script.ScriptService;
 import org.elasticsearch.threadpool.ThreadPool;
 
@@ -120,7 +118,6 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
     private final BigArrays bigArrays;
     private final AsyncGlobalCheckpointTask globalCheckpointTask;
     private final ScriptService scriptService;
-    private final IndicesQueriesRegistry queryRegistry;
     private final ClusterService clusterService;
     private final Client client;
 
@@ -134,7 +131,6 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                         BigArrays bigArrays,
                         ThreadPool threadPool,
                         ScriptService scriptService,
-                        IndicesQueriesRegistry queryRegistry,
                         ClusterService clusterService,
                         Client client,
                         QueryCache queryCache,
@@ -162,7 +158,6 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         this.bigArrays = bigArrays;
         this.threadPool = threadPool;
         this.scriptService = scriptService;
-        this.queryRegistry = queryRegistry;
         this.clusterService = clusterService;
         this.client = client;
         this.eventListener = eventListener;
@@ -348,8 +343,8 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
 
             logger.debug("creating shard_id {}", shardId);
             // if we are on a shared FS we only own the shard (ie. we can safely delete it) if we are the primary.
-            final boolean canDeleteShardContent = IndexMetaData.isOnSharedFilesystem(indexSettings) == false ||
-                (primary && IndexMetaData.isOnSharedFilesystem(indexSettings));
+            final boolean canDeleteShardContent = this.indexSettings.isOnSharedFilesystem() == false ||
+                (primary && this.indexSettings.isOnSharedFilesystem());
             final Engine.Warmer engineWarmer = (searcher) -> {
                 IndexShard shard =  getShardOrNull(shardId.getId());
                 if (shard != null) {
@@ -358,7 +353,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             };
             store = new Store(shardId, this.indexSettings, indexStore.newDirectoryService(path), lock,
                 new StoreCloseListener(shardId, canDeleteShardContent, () -> eventListener.onStoreClosed(shardId)));
-            if (useShadowEngine(primary, indexSettings)) {
+            if (useShadowEngine(primary, this.indexSettings)) {
                 indexShard = new ShadowIndexShard(routing, this.indexSettings, path, store, indexCache, mapperService, similarityService,
                     indexFieldData, engineFactory, eventListener, searcherWrapper, threadPool, bigArrays, engineWarmer,
                     searchOperationListeners);
@@ -386,8 +381,8 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         }
     }
 
-    static boolean useShadowEngine(boolean primary, Settings indexSettings) {
-        return primary == false && IndexMetaData.isIndexUsingShadowReplicas(indexSettings);
+    static boolean useShadowEngine(boolean primary, IndexSettings indexSettings) {
+        return primary == false && indexSettings.isShadowReplicaIndex();
     }
 
     @Override
@@ -478,7 +473,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
     public QueryShardContext newQueryShardContext(int shardId, IndexReader indexReader, LongSupplier nowInMillis) {
         return new QueryShardContext(
             shardId, indexSettings, indexCache.bitsetFilterCache(), indexFieldData, mapperService(),
-                similarityService(), scriptService, xContentRegistry, queryRegistry,
+                similarityService(), scriptService, xContentRegistry,
                 client, indexReader,
             nowInMillis);
     }
@@ -522,7 +517,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         private final boolean ownsShard;
         private final Closeable[] toClose;
 
-        public StoreCloseListener(ShardId shardId, boolean ownsShard, Closeable... toClose) {
+        StoreCloseListener(ShardId shardId, boolean ownsShard, Closeable... toClose) {
             this.shardId = shardId;
             this.ownsShard = ownsShard;
             this.toClose = toClose;
@@ -577,7 +572,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
     private final class FieldDataCacheListener implements IndexFieldDataCache.Listener {
         final IndexService indexService;
 
-        public FieldDataCacheListener(IndexService indexService) {
+        FieldDataCacheListener(IndexService indexService) {
             this.indexService = indexService;
         }
 
@@ -679,7 +674,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                     if (translog.syncNeeded()) {
                         translog.sync();
                     }
-                } catch (EngineClosedException | AlreadyClosedException ex) {
+                } catch (AlreadyClosedException ex) {
                     // fine - continue;
                 } catch (IOException e) {
                     logger.warn("failed to sync translog", e);
@@ -727,7 +722,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                     case STARTED:
                         try {
                             shard.updateGlobalCheckpointOnPrimary();
-                        } catch (EngineClosedException | AlreadyClosedException ex) {
+                        } catch (AlreadyClosedException ex) {
                             // fine - continue, the shard was concurrently closed on us.
                         }
                         continue;

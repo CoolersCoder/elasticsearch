@@ -21,7 +21,6 @@ package org.elasticsearch.search.aggregations.bucket.terms.support;
 import com.carrotsearch.hppc.BitMixer;
 import com.carrotsearch.hppc.LongHashSet;
 import com.carrotsearch.hppc.LongSet;
-
 import org.apache.lucene.index.RandomAccessOrds;
 import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.index.Terms;
@@ -39,7 +38,6 @@ import org.apache.lucene.util.automaton.RegExp;
 import org.elasticsearch.ElasticsearchParseException;
 import org.elasticsearch.Version;
 import org.elasticsearch.common.ParseField;
-import org.elasticsearch.common.ParseFieldMatcher;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
@@ -63,7 +61,6 @@ import java.util.TreeSet;
 public class IncludeExclude implements Writeable, ToXContent {
     public static final ParseField INCLUDE_FIELD = new ParseField("include");
     public static final ParseField EXCLUDE_FIELD = new ParseField("exclude");
-    public static final ParseField PATTERN_FIELD = new ParseField("pattern");
     public static final ParseField PARTITION_FIELD = new ParseField("partition");
     public static final ParseField NUM_PARTITIONS_FIELD = new ParseField("num_partitions");
     // Needed to add this seed for a deterministic term hashing policy
@@ -103,20 +100,14 @@ public class IncludeExclude implements Writeable, ToXContent {
         } else if (token == XContentParser.Token.START_ARRAY) {
             return new IncludeExclude(new TreeSet<>(parseArrayToSet(parser)), null);
         } else if (token == XContentParser.Token.START_OBJECT) {
-            ParseFieldMatcher parseFieldMatcher = context.getParseFieldMatcher();
             String currentFieldName = null;
             Integer partition = null, numPartitions = null;
             while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
                 if (token == XContentParser.Token.FIELD_NAME) {
                     currentFieldName = parser.currentName();
-                } else
-                // This "include":{"pattern":"foo.*"} syntax is undocumented since 2.0
-                // Regexes should be "include":"foo.*"
-                if (parseFieldMatcher.match(currentFieldName, PATTERN_FIELD)) {
-                    return new IncludeExclude(parser.text(), null);
-                } else if (parseFieldMatcher.match(currentFieldName, NUM_PARTITIONS_FIELD)) {
+                } else if (NUM_PARTITIONS_FIELD.match(currentFieldName)) {
                     numPartitions = parser.intValue();
-                } else if (parseFieldMatcher.match(currentFieldName, PARTITION_FIELD)) {
+                } else if (PARTITION_FIELD.match(currentFieldName)) {
                     partition = parser.intValue();
                 } else {
                     throw new ElasticsearchParseException(
@@ -226,7 +217,7 @@ public class IncludeExclude implements Writeable, ToXContent {
         private final Set<BytesRef> valids;
         private final Set<BytesRef> invalids;
 
-        public TermListBackedStringFilter(Set<BytesRef> includeValues, Set<BytesRef> excludeValues) {
+        TermListBackedStringFilter(Set<BytesRef> includeValues, Set<BytesRef> excludeValues) {
             this.valids = includeValues;
             this.invalids = excludeValues;
         }
@@ -298,7 +289,7 @@ public class IncludeExclude implements Writeable, ToXContent {
         private final SortedSet<BytesRef> includeValues;
         private final SortedSet<BytesRef> excludeValues;
 
-        public TermListBackedOrdinalsFilter(SortedSet<BytesRef> includeValues, SortedSet<BytesRef> excludeValues) {
+        TermListBackedOrdinalsFilter(SortedSet<BytesRef> includeValues, SortedSet<BytesRef> excludeValues) {
             this.includeValues = includeValues;
             this.excludeValues = excludeValues;
         }

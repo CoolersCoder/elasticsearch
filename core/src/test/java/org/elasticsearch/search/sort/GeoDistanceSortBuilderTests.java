@@ -22,22 +22,18 @@ package org.elasticsearch.search.sort;
 
 import org.apache.lucene.document.LatLonDocValuesField;
 import org.apache.lucene.search.SortField;
-import org.elasticsearch.ElasticsearchParseException;
-import org.elasticsearch.common.ParseFieldMatcher;
-import org.elasticsearch.common.ParsingException;
 import org.elasticsearch.common.geo.GeoDistance;
 import org.elasticsearch.common.geo.GeoPoint;
 import org.elasticsearch.common.unit.DistanceUnit;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.common.xcontent.json.JsonXContent;
-import org.elasticsearch.index.mapper.LatLonPointFieldMapper;
+import org.elasticsearch.index.mapper.GeoPointFieldMapper;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.query.GeoValidationMethod;
 import org.elasticsearch.index.query.MatchAllQueryBuilder;
 import org.elasticsearch.index.query.QueryParseContext;
 import org.elasticsearch.index.query.QueryShardContext;
-import org.elasticsearch.indices.query.IndicesQueriesRegistry;
 import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.test.geo.RandomGeoGenerator;
 
@@ -109,7 +105,7 @@ public class GeoDistanceSortBuilderTests extends AbstractSortTestCase<GeoDistanc
 
     @Override
     protected MappedFieldType provideMappedFieldType(String name) {
-        MappedFieldType clone = LatLonPointFieldMapper.Defaults.FIELD_TYPE.clone();
+        MappedFieldType clone = GeoPointFieldMapper.Defaults.FIELD_TYPE.clone();
         clone.setName(name);
         return clone;
     }
@@ -197,106 +193,6 @@ public class GeoDistanceSortBuilderTests extends AbstractSortTestCase<GeoDistanc
           }
     }
 
-    public void testReverseOptionFailsWhenNonStringField() throws IOException {
-        String json = "{\n" +
-                "  \"testname\" : [ {\n" +
-                "    \"lat\" : -6.046997540714173,\n" +
-                "    \"lon\" : -51.94128329747579\n" +
-                "  } ],\n" +
-                "  \"reverse\" : true\n" +
-                "}";
-        XContentParser itemParser = createParser(JsonXContent.jsonXContent, json);
-        itemParser.nextToken();
-
-        QueryParseContext context = new QueryParseContext(indicesQueriesRegistry, itemParser, ParseFieldMatcher.STRICT);
-
-        try {
-          GeoDistanceSortBuilder.fromXContent(context, "");
-          fail("adding reverse sorting option should fail with an exception");
-        } catch (ParsingException e) {
-            assertEquals("Only geohashes of type string supported for field [reverse]", e.getMessage());
-        }
-    }
-
-    public void testReverseOptionFailsWhenStringFieldButResetting() throws IOException {
-        String json = "{\n" +
-                "  \"testname\" : [ {\n" +
-                "    \"lat\" : -6.046997540714173,\n" +
-                "    \"lon\" : -51.94128329747579\n" +
-                "  } ],\n" +
-                "  \"reverse\" : \"true\"\n" +
-                "}";
-        XContentParser itemParser = createParser(JsonXContent.jsonXContent, json);
-        itemParser.nextToken();
-
-        QueryParseContext context = new QueryParseContext(indicesQueriesRegistry, itemParser, ParseFieldMatcher.STRICT);
-
-        try {
-          GeoDistanceSortBuilder.fromXContent(context, "");
-          fail("adding reverse sorting option should fail with an exception");
-        } catch (ParsingException e) {
-            assertEquals("Trying to reset fieldName to [reverse], already set to [testname].", e.getMessage());
-        }
-    }
-
-    public void testReverseOptionFailsBuildWhenInvalidGeoHashString() throws IOException {
-        String json = "{\n" +
-                "  \"reverse\" : \"false\"\n" +
-                "}";
-        XContentParser itemParser = createParser(JsonXContent.jsonXContent, json);
-        itemParser.nextToken();
-
-        QueryParseContext context = new QueryParseContext(indicesQueriesRegistry, itemParser, ParseFieldMatcher.STRICT);
-
-        try {
-          GeoDistanceSortBuilder item = GeoDistanceSortBuilder.fromXContent(context, "");
-          item.validation(GeoValidationMethod.STRICT);
-          item.build(createMockShardContext());
-
-          fail("adding reverse sorting option should fail with an exception");
-        } catch (ElasticsearchParseException e) {
-            assertEquals("illegal latitude value [269.384765625] for [GeoDistanceSort] for field [reverse].", e.getMessage());
-        }
-    }
-    
-    public void testCoerceIsDeprecated() throws IOException {
-        String json = "{\n" +
-                "  \"testname\" : [ {\n" +
-                "    \"lat\" : -6.046997540714173,\n" +
-                "    \"lon\" : -51.94128329747579\n" +
-                "  } ],\n" +
-                "  \"unit\" : \"m\",\n" +
-                "  \"distance_type\" : \"sloppy_arc\",\n" +
-                "  \"mode\" : \"MAX\",\n" +
-                "  \"coerce\" : true\n" +
-                "}";
-        XContentParser itemParser = createParser(JsonXContent.jsonXContent, json);
-        itemParser.nextToken();
-
-        QueryParseContext context = new QueryParseContext(indicesQueriesRegistry, itemParser, ParseFieldMatcher.EMPTY);
-        GeoDistanceSortBuilder.fromXContent(context, "");
-        assertWarnings("Deprecated field [coerce] used, replaced by [validation_method]");
-    }
-
-    public void testIgnoreMalformedIsDeprecated() throws IOException {
-        String json = "{\n" +
-                "  \"testname\" : [ {\n" +
-                "    \"lat\" : -6.046997540714173,\n" +
-                "    \"lon\" : -51.94128329747579\n" +
-                "  } ],\n" +
-                "  \"unit\" : \"m\",\n" +
-                "  \"distance_type\" : \"sloppy_arc\",\n" +
-                "  \"mode\" : \"MAX\",\n" +
-                "  \"ignore_malformed\" : true\n" +
-                "}";
-        XContentParser itemParser = createParser(JsonXContent.jsonXContent, json);
-        itemParser.nextToken();
-
-        QueryParseContext context = new QueryParseContext(indicesQueriesRegistry, itemParser, ParseFieldMatcher.EMPTY);
-        GeoDistanceSortBuilder.fromXContent(context, "");
-        assertWarnings("Deprecated field [ignore_malformed] used, replaced by [validation_method]");
-    }
-
     public void testSortModeSumIsRejectedInJSON() throws IOException {
         String json = "{\n" +
                 "  \"testname\" : [ {\n" +
@@ -304,13 +200,13 @@ public class GeoDistanceSortBuilderTests extends AbstractSortTestCase<GeoDistanc
                 "    \"lon\" : -51.94128329747579\n" +
                 "  } ],\n" +
                 "  \"unit\" : \"m\",\n" +
-                "  \"distance_type\" : \"sloppy_arc\",\n" +
+                "  \"distance_type\" : \"arc\",\n" +
                 "  \"mode\" : \"SUM\"\n" +
                 "}";
         XContentParser itemParser = createParser(JsonXContent.jsonXContent, json);
         itemParser.nextToken();
 
-        QueryParseContext context = new QueryParseContext(indicesQueriesRegistry, itemParser, ParseFieldMatcher.STRICT);
+        QueryParseContext context = new QueryParseContext(itemParser);
 
         IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> GeoDistanceSortBuilder.fromXContent(context, ""));
         assertEquals("sort_mode [sum] isn't supported for sorting by geo distance", e.getMessage());
@@ -321,7 +217,7 @@ public class GeoDistanceSortBuilderTests extends AbstractSortTestCase<GeoDistanc
                 "    \"VDcvDuFjE\" : [ \"7umzzv8eychg\", \"dmdgmt5z13uw\", " +
                 "    \"ezu09wxw6v4c\", \"kc7s3515p6k6\", \"jgeuvjwrmfzn\", \"kcpcfj7ruyf8\" ],\n" +
                 "    \"unit\" : \"m\",\n" +
-                "    \"distance_type\" : \"sloppy_arc\",\n" +
+                "    \"distance_type\" : \"arc\",\n" +
                 "    \"mode\" : \"MAX\",\n" +
                 "    \"nested_filter\" : {\n" +
                 "      \"ids\" : {\n" +
@@ -335,7 +231,7 @@ public class GeoDistanceSortBuilderTests extends AbstractSortTestCase<GeoDistanc
         XContentParser itemParser = createParser(JsonXContent.jsonXContent, json);
         itemParser.nextToken();
 
-        QueryParseContext context = new QueryParseContext(indicesQueriesRegistry, itemParser, ParseFieldMatcher.STRICT);
+        QueryParseContext context = new QueryParseContext(itemParser);
 
         GeoDistanceSortBuilder result = GeoDistanceSortBuilder.fromXContent(context, json);
         assertEquals("[-19.700583312660456, -2.8225036337971687, "
@@ -457,7 +353,7 @@ public class GeoDistanceSortBuilderTests extends AbstractSortTestCase<GeoDistanc
 
     private GeoDistanceSortBuilder parse(XContentBuilder sortBuilder) throws Exception {
         XContentParser parser = createParser(sortBuilder);
-        QueryParseContext parseContext = new QueryParseContext(new IndicesQueriesRegistry(), parser, ParseFieldMatcher.STRICT);
+        QueryParseContext parseContext = new QueryParseContext(parser);
         parser.nextToken();
         return GeoDistanceSortBuilder.fromXContent(parseContext, null);
     }

@@ -29,7 +29,6 @@ import com.carrotsearch.randomizedtesting.generators.RandomNumbers;
 import com.carrotsearch.randomizedtesting.generators.RandomPicks;
 import com.carrotsearch.randomizedtesting.generators.RandomStrings;
 import com.carrotsearch.randomizedtesting.rules.TestRuleAdapter;
-
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -47,6 +46,7 @@ import org.apache.lucene.util.TimeUnits;
 import org.elasticsearch.Version;
 import org.elasticsearch.bootstrap.BootstrapForTesting;
 import org.elasticsearch.client.Requests;
+import org.elasticsearch.cluster.ClusterModule;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.PathUtils;
@@ -59,17 +59,21 @@ import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.common.logging.DeprecationLogger;
 import org.elasticsearch.common.logging.Loggers;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.TransportAddress;
 import org.elasticsearch.common.util.MockBigArrays;
 import org.elasticsearch.common.util.MockPageCacheRecycler;
-import org.elasticsearch.common.xcontent.NamedXContentRegistry;
-import org.elasticsearch.common.xcontent.XContent;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
+import org.elasticsearch.common.xcontent.NamedXContentRegistry;
+import org.elasticsearch.common.xcontent.ToXContent;
+import org.elasticsearch.common.xcontent.XContent;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentFactory;
+import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.common.xcontent.XContentType;
+import org.elasticsearch.common.xcontent.json.JsonXContent;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.env.NodeEnvironment;
 import org.elasticsearch.index.Index;
@@ -115,6 +119,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
 import java.util.TreeMap;
@@ -126,14 +131,13 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static java.util.Collections.emptyList;
 import static java.util.Collections.singletonList;
 import static org.elasticsearch.common.util.CollectionUtils.arrayAsArrayList;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.hasItem;
-import static org.hamcrest.Matchers.hasSize;
 
 /**
  * Base testcase for randomized unit testing with Elasticsearch
@@ -178,6 +182,7 @@ public abstract class ESTestCase extends LuceneTestCase {
     }
 
     protected final Logger logger = Loggers.getLogger(getClass());
+    protected final DeprecationLogger deprecationLogger = new DeprecationLogger(logger);
     private ThreadContext threadContext;
 
     // -----------------------------------------------------------------
@@ -257,6 +262,7 @@ public abstract class ESTestCase extends LuceneTestCase {
     @Before
     public final void before()  {
         logger.info("[{}]: before test", getTestName());
+        assertNull("Thread context initialized twice", threadContext);
         if (enableWarningsCheck()) {
             this.threadContext = new ThreadContext(Settings.EMPTY);
             DeprecationLogger.setThreadContext(threadContext);
@@ -274,8 +280,13 @@ public abstract class ESTestCase extends LuceneTestCase {
     @After
     public final void after() throws Exception {
         checkStaticState();
-        if (enableWarningsCheck()) {
+        // We check threadContext != null rather than enableWarningsCheck()
+        // because after methods are still called in the event that before
+        // methods failed, in which case threadContext might not have been
+        // initialized
+        if (threadContext != null) {
             ensureNoWarnings();
+            assert threadContext == null;
         }
         ensureAllSearchContextsReleased();
         ensureCheckIndexPassed();
@@ -283,33 +294,74 @@ public abstract class ESTestCase extends LuceneTestCase {
     }
 
     private void ensureNoWarnings() throws IOException {
-        //Check that there are no unaccounted warning headers. These should be checked with {@link #checkWarningHeaders(String...)} in the
+        //Check that there are no unaccounted warning headers. These should be checked with {@link #assertWarnings(String...)} in the
         //appropriate test
         try {
-            final List<String> warnings = threadContext.getResponseHeaders().get(DeprecationLogger.WARNING_HEADER);
+            final List<String> warnings = threadContext.getResponseHeaders().get("Warning");
             assertNull("unexpected warning headers", warnings);
         } finally {
-            DeprecationLogger.removeThreadContext(this.threadContext);
-            this.threadContext.close();
+            resetDeprecationLogger(false);
         }
     }
 
-    protected final void assertWarnings(String... expectedWarnings) throws IOException {
+    /**
+     * Convenience method to assert warnings for settings deprecations and general deprecation warnings.
+     *
+     * @param settings the settings that are expected to be deprecated
+     * @param warnings other expected general deprecation warnings
+     */
+    protected final void assertSettingDeprecationsAndWarnings(final Setting<?>[] settings, final String... warnings) {
+        assertWarnings(
+                Stream.concat(
+                        Arrays
+                                .stream(settings)
+                                .map(Setting::getKey)
+                                .map(k -> "[" + k + "] setting was deprecated in Elasticsearch and will be removed in a future release! " +
+                                        "See the breaking changes documentation for the next major version."),
+                        Arrays.stream(warnings))
+                        .toArray(String[]::new));
+    }
+
+    protected final void assertWarnings(String... expectedWarnings) {
         if (enableWarningsCheck() == false) {
             throw new IllegalStateException("unable to check warning headers if the test is not set to do so");
         }
         try {
-            final List<String> actualWarnings = threadContext.getResponseHeaders().get(DeprecationLogger.WARNING_HEADER);
-            assertThat(actualWarnings, hasSize(expectedWarnings.length));
+            final List<String> actualWarnings = threadContext.getResponseHeaders().get("Warning");
+            final Set<String> actualWarningValues =
+                    actualWarnings.stream().map(DeprecationLogger::extractWarningValueFromWarningHeader).collect(Collectors.toSet());
             for (String msg : expectedWarnings) {
-                assertThat(actualWarnings, hasItem(equalTo(msg)));
+                assertTrue(actualWarningValues.contains(DeprecationLogger.escape(msg)));
             }
+            assertEquals("Expected " + expectedWarnings.length + " warnings but found " + actualWarnings.size() + "\nExpected: "
+                    + Arrays.asList(expectedWarnings) + "\nActual: " + actualWarnings,
+                expectedWarnings.length, actualWarnings.size());
         } finally {
-            // "clear" current warning headers by setting a new ThreadContext
-            DeprecationLogger.removeThreadContext(this.threadContext);
+            resetDeprecationLogger(true);
+        }
+    }
+
+    /**
+     * Reset the deprecation logger by removing the current thread context, and setting a new thread context if {@code setNewThreadContext}
+     * is set to {@code true} and otherwise clearing the current thread context.
+     *
+     * @param setNewThreadContext whether or not to attach a new thread context to the deprecation logger
+     */
+    private void resetDeprecationLogger(final boolean setNewThreadContext) {
+        // "clear" current warning headers by setting a new ThreadContext
+        DeprecationLogger.removeThreadContext(this.threadContext);
+        try {
             this.threadContext.close();
+            // catch IOException to avoid that call sites have to deal with it. It is only declared because this class implements Closeable
+            // but it is impossible that this implementation will ever throw an IOException.
+        } catch (IOException ex) {
+            throw new AssertionError("IOException thrown while closing deprecation logger's thread context", ex);
+        }
+        if (setNewThreadContext) {
             this.threadContext = new ThreadContext(Settings.EMPTY);
             DeprecationLogger.setThreadContext(this.threadContext);
+        } else {
+            this.threadContext = null;
         }
     }
 
@@ -441,7 +493,7 @@ public abstract class ESTestCase extends LuceneTestCase {
         return random().nextInt();
     }
 
-    public static long randomPositiveLong() {
+    public static long randomNonNegativeLong() {
         long randomLong;
         do {
             randomLong = randomLong();
@@ -795,7 +847,8 @@ public abstract class ESTestCase extends LuceneTestCase {
      */
     public static <T> List<T> randomSubsetOf(int size, Collection<T> collection) {
         if (size > collection.size()) {
-            throw new IllegalArgumentException("Can\'t pick " + size + " random objects from a collection of " + collection.size() + " objects");
+            throw new IllegalArgumentException("Can\'t pick " + size + " random objects from a collection of " +
+                    collection.size() + " objects");
         }
         List<T> tempList = new ArrayList<>(collection);
         Collections.shuffle(tempList, random());
@@ -840,11 +893,22 @@ public abstract class ESTestCase extends LuceneTestCase {
      * internally should stay untouched.
      */
     public XContentBuilder shuffleXContent(XContentBuilder builder, String... exceptFieldNames) throws IOException {
-        XContentParser parser = createParser(builder);
+        try (XContentParser parser = createParser(builder)) {
+            return shuffleXContent(parser, builder.isPrettyPrint(), exceptFieldNames);
+        }
+    }
+
+    /**
+     * Randomly shuffles the fields inside objects parsed using the {@link XContentParser} passed in.
+     * Recursively goes through inner objects and also shuffles them. Exceptions for this
+     * recursive shuffling behavior can be made by passing in the names of fields which
+     * internally should stay untouched.
+     */
+    public XContentBuilder shuffleXContent(XContentParser parser, boolean prettyPrint, String... exceptFieldNames) throws IOException {
         // use ordered maps for reproducibility
         Map<String, Object> shuffledMap = shuffleMap(parser.mapOrdered(), new HashSet<>(Arrays.asList(exceptFieldNames)));
-        XContentBuilder xContentBuilder = XContentFactory.contentBuilder(builder.contentType());
-        if (builder.isPrettyPrint()) {
+        XContentBuilder xContentBuilder = XContentFactory.contentBuilder(parser.contentType());
+        if (prettyPrint) {
             xContentBuilder.prettyPrint();
         }
         return xContentBuilder.map(shuffledMap);
@@ -933,6 +997,38 @@ public abstract class ESTestCase extends LuceneTestCase {
     }
 
     /**
+     * Assert that two objects are equals, calling {@link ToXContent#toXContent(XContentBuilder, ToXContent.Params)} to print out their
+     * differences if they aren't equal.
+     */
+    public static <T extends ToXContent> void assertEqualsWithErrorMessageFromXContent(T expected, T actual) {
+        if (Objects.equals(expected, actual)) {
+            return;
+        }
+        if (expected == null) {
+            throw new AssertionError("Expected null be actual was [" + actual.toString() + "]");
+        }
+        if (actual == null) {
+            throw new AssertionError("Didn't expect null but actual was [null]");
+        }
+        try (XContentBuilder actualJson = JsonXContent.contentBuilder();
+                XContentBuilder expectedJson = JsonXContent.contentBuilder()) {
+            actualJson.startObject();
+            actual.toXContent(actualJson, ToXContent.EMPTY_PARAMS);
+            actualJson.endObject();
+            expectedJson.startObject();
+            expected.toXContent(expectedJson, ToXContent.EMPTY_PARAMS);
+            expectedJson.endObject();
+            NotEqualMessageBuilder message = new NotEqualMessageBuilder();
+            message.compareMaps(
+                    XContentHelper.convertToMap(actualJson.bytes(), false).v2(),
+                    XContentHelper.convertToMap(expectedJson.bytes(), false).v2());
+            throw new AssertionError("Didn't match expected value:\n" + message);
+        } catch (IOException e) {
+            throw new AssertionError("IOException while building failure message", e);
+        }
+    }
+
+    /**
      * Create a new {@link XContentParser}.
      */
     protected final XContentParser createParser(XContentBuilder builder) throws IOException {
@@ -971,7 +1067,7 @@ public abstract class ESTestCase extends LuceneTestCase {
      * The {@link NamedXContentRegistry} to use for this test. Subclasses should override and use liberally.
      */
     protected NamedXContentRegistry xContentRegistry() {
-        return NamedXContentRegistry.EMPTY;
+        return new NamedXContentRegistry(ClusterModule.getNamedXWriteables());
     }
 
     /** Returns the suite failure marker: internal use only! */
@@ -997,9 +1093,15 @@ public abstract class ESTestCase extends LuceneTestCase {
     }
 
     protected static long spinForAtLeastOneMillisecond() {
-        long nanosecondsInMillisecond = TimeUnit.NANOSECONDS.convert(1, TimeUnit.MILLISECONDS);
-        // force at least one millisecond to elapse, but ensure the
-        // clock has enough resolution to observe the passage of time
+        return spinForAtLeastNMilliseconds(1);
+    }
+
+    protected static long spinForAtLeastNMilliseconds(final long ms) {
+        long nanosecondsInMillisecond = TimeUnit.NANOSECONDS.convert(ms, TimeUnit.MILLISECONDS);
+        /*
+         * Force at least ms milliseconds to elapse, but ensure the clock has enough resolution to
+         * observe the passage of time.
+         */
         long start = System.nanoTime();
         long elapsed;
         while ((elapsed = (System.nanoTime() - start)) < nanosecondsInMillisecond) {

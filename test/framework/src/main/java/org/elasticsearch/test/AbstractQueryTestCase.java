@@ -38,7 +38,6 @@ import org.elasticsearch.action.termvectors.MultiTermVectorsResponse;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.metadata.MetaData;
-import org.elasticsearch.common.ParseFieldMatcher;
 import org.elasticsearch.common.ParsingException;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.collect.Tuple;
@@ -83,8 +82,7 @@ import org.elasticsearch.indices.analysis.AnalysisModule;
 import org.elasticsearch.indices.breaker.NoneCircuitBreakerService;
 import org.elasticsearch.indices.fielddata.cache.IndicesFieldDataCache;
 import org.elasticsearch.indices.mapper.MapperRegistry;
-import org.elasticsearch.indices.query.IndicesQueriesRegistry;
-import org.elasticsearch.node.internal.InternalSettingsPreparer;
+import org.elasticsearch.node.InternalSettingsPreparer;
 import org.elasticsearch.plugins.MapperPlugin;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.plugins.PluginsService;
@@ -522,12 +520,7 @@ public abstract class AbstractQueryTestCase<QB extends AbstractQueryBuilder<QB>>
      * Parses the query provided as string argument and compares it with the expected result provided as argument as a {@link QueryBuilder}
      */
     protected void assertParsedQuery(String queryAsString, QueryBuilder expectedQuery) throws IOException {
-        assertParsedQuery(queryAsString, expectedQuery, ParseFieldMatcher.STRICT);
-    }
-
-    protected void assertParsedQuery(String queryAsString, QueryBuilder expectedQuery, ParseFieldMatcher matcher)
-            throws IOException {
-        QueryBuilder newQuery = parseQuery(queryAsString, matcher);
+        QueryBuilder newQuery = parseQuery(queryAsString);
         assertNotSame(newQuery, expectedQuery);
         assertEquals(expectedQuery, newQuery);
         assertEquals(expectedQuery.hashCode(), newQuery.hashCode());
@@ -536,37 +529,24 @@ public abstract class AbstractQueryTestCase<QB extends AbstractQueryBuilder<QB>>
     /**
      * Parses the query provided as bytes argument and compares it with the expected result provided as argument as a {@link QueryBuilder}
      */
-    private void assertParsedQuery(XContentParser parser, QueryBuilder expectedQuery) throws IOException {
-        assertParsedQuery(parser, expectedQuery, ParseFieldMatcher.STRICT);
-    }
-
-    private void assertParsedQuery(XContentParser parser, QueryBuilder expectedQuery, ParseFieldMatcher matcher)
-            throws IOException {
-        QueryBuilder newQuery = parseQuery(parser, matcher);
+    private static void assertParsedQuery(XContentParser parser, QueryBuilder expectedQuery) throws IOException {
+        QueryBuilder newQuery = parseQuery(parser);
         assertNotSame(newQuery, expectedQuery);
         assertEquals(expectedQuery, newQuery);
         assertEquals(expectedQuery.hashCode(), newQuery.hashCode());
     }
 
-    protected QueryBuilder parseQuery(String queryAsString) throws IOException {
-        return parseQuery(queryAsString, ParseFieldMatcher.STRICT);
-    }
-
-    protected QueryBuilder parseQuery(XContentParser parser) throws IOException {
-        return parseQuery(parser, ParseFieldMatcher.STRICT);
-    }
-
     protected QueryBuilder parseQuery(AbstractQueryBuilder<?> builder) throws IOException {
-        return parseQuery(createParser(JsonXContent.jsonXContent, builder.buildAsBytes(XContentType.JSON)), ParseFieldMatcher.STRICT);
+        return parseQuery(createParser(JsonXContent.jsonXContent, builder.buildAsBytes(XContentType.JSON)));
     }
 
-    protected QueryBuilder parseQuery(String queryAsString, ParseFieldMatcher matcher) throws IOException {
+    protected QueryBuilder parseQuery(String queryAsString) throws IOException {
         XContentParser parser = createParser(JsonXContent.jsonXContent, queryAsString);
-        return parseQuery(parser, matcher);
+        return parseQuery(parser);
     }
 
-    private QueryBuilder parseQuery(XContentParser parser, ParseFieldMatcher matcher) throws IOException {
-        QueryParseContext context = createParseContext(parser, matcher);
+    protected static QueryBuilder parseQuery(XContentParser parser) throws IOException {
+        QueryParseContext context = createParseContext(parser);
         QueryBuilder parseInnerQueryBuilder = context.parseInnerQueryBuilder();
         assertNull(parser.nextToken());
         return parseInnerQueryBuilder;
@@ -775,11 +755,8 @@ public abstract class AbstractQueryTestCase<QB extends AbstractQueryBuilder<QB>>
         return serviceHolder.createShardContext();
     }
 
-    /**
-     * @return a new {@link QueryParseContext} based on the base test index and queryParserService
-     */
-    protected static QueryParseContext createParseContext(XContentParser parser, ParseFieldMatcher matcher) {
-        return new QueryParseContext(serviceHolder.indicesQueriesRegistry, parser, matcher);
+    private static QueryParseContext createParseContext(XContentParser parser) {
+        return new QueryParseContext(parser);
     }
 
     /**
@@ -1013,8 +990,6 @@ public abstract class AbstractQueryTestCase<QB extends AbstractQueryBuilder<QB>>
     }
 
     private static class ServiceHolder implements Closeable {
-
-        private final IndicesQueriesRegistry indicesQueriesRegistry;
         private final IndexFieldDataService indexFieldDataService;
         private final SearchModule searchModule;
         private final NamedWriteableRegistry namedWriteableRegistry;
@@ -1026,7 +1001,7 @@ public abstract class AbstractQueryTestCase<QB extends AbstractQueryBuilder<QB>>
         private final BitsetFilterCache bitsetFilterCache;
         private final ScriptService scriptService;
         private final Client client;
-        private final long nowInMillis = randomPositiveLong();
+        private final long nowInMillis = randomNonNegativeLong();
 
         ServiceHolder(Settings nodeSettings, Settings indexSettings,
                       Collection<Class<? extends Plugin>> plugins, AbstractQueryTestCase<?> testCase) throws IOException {
@@ -1075,7 +1050,6 @@ public abstract class AbstractQueryTestCase<QB extends AbstractQueryBuilder<QB>>
 
                 }
             });
-            indicesQueriesRegistry = searchModule.getQueryParserRegistry();
 
             for (String type : currentTypes) {
                 mapperService.merge(type, new CompressedXContent(PutMappingRequest.buildFromSimplifiedDef(type,
@@ -1106,7 +1080,7 @@ public abstract class AbstractQueryTestCase<QB extends AbstractQueryBuilder<QB>>
 
         QueryShardContext createShardContext() {
             return new QueryShardContext(0, idxSettings, bitsetFilterCache, indexFieldDataService, mapperService, similarityService,
-                    scriptService, xContentRegistry, indicesQueriesRegistry, this.client, null, () -> nowInMillis);
+                    scriptService, xContentRegistry, this.client, null, () -> nowInMillis);
         }
 
         ScriptModule createScriptModule(List<ScriptPlugin> scriptPlugins) {
